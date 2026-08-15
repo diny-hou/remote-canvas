@@ -3076,6 +3076,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-xml"
 version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3285,12 +3291,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-canvas-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "enigo",
  "image 0.25.10",
  "local-ip-address",
+ "qrcode",
  "rand 0.8.7",
  "screenshots",
  "serde",

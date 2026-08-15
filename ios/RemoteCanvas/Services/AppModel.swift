@@ -88,7 +88,7 @@ enum PairingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCode:
-            "接続先URLと12文字以上の接続キーを確認してください。"
+            "接続先URLまたはWindowsから受け取った端末鍵が正しくありません。"
         }
     }
 }

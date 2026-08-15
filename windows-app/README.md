@@ -9,6 +9,8 @@ and status UI.
 - Prefers an active Tailscale IPv4 address for the endpoint shown in the UI.
 - Persists a random 192-bit key in
   `%APPDATA%\RemoteCanvas\access-token.txt`.
+- Exchanges a five-minute, six-digit pairing code for that key; the code is
+  single-use and locks after five failed attempts.
 - Streams the primary display as JPEG over an authenticated WebSocket.
 - Accepts pointer, click, scroll, and Unicode text input.
 - Allows authenticated file access only below the current user's Desktop,
@@ -38,7 +40,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 The installer is written to:
 
 ```text
-src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.2.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.3.0_x64-setup.exe
 ```
 
 For a combined build/install attempt, use:
@@ -59,5 +61,5 @@ trusted private networks only; it is not safe on an untrusted Wi-Fi network.
 
 Capture is JPEG at roughly 8 fps rather than hardware-encoded video. The host
 does not yet run as a Windows service and cannot control UAC/secure desktop.
-Audio, clipboard, multi-monitor selection, QR pairing, per-device credentials,
+Audio, clipboard, multi-monitor selection, per-device credential rotation,
 and device revocation are not yet implemented.

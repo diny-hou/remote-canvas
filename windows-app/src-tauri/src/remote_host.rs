@@ -6,24 +6,43 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 pub const HOST_PORT: u16 = 47_831;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+pub const PAIRING_TTL_SECONDS: u64 = 5 * 60;
+const MAX_PAIRING_ATTEMPTS: u8 = 5;
+
+struct PairingSession {
+    code: Option<String>,
+    expires_at: Instant,
+    failed_attempts: u8,
+}
+
+impl PairingSession {
+    fn inactive() -> Self {
+        Self {
+            code: None,
+            expires_at: Instant::now(),
+            failed_attempts: 0,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct RemoteHostState {
     pub access_token: Arc<String>,
     pub endpoint: Arc<String>,
+    pairing: Arc<Mutex<PairingSession>>,
 }
 
 impl RemoteHostState {
@@ -44,7 +63,51 @@ impl RemoteHostState {
         Self {
             access_token: Arc::new(access_token),
             endpoint: Arc::new(format!("http://{address}:{HOST_PORT}")),
+            pairing: Arc::new(Mutex::new(PairingSession::inactive())),
         }
+    }
+
+    pub fn begin_pairing(&self) -> String {
+        let code = format!("{:06}", OsRng.gen_range(0..1_000_000_u32));
+        let mut pairing = self
+            .pairing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pairing.code = Some(code.clone());
+        pairing.expires_at = Instant::now() + Duration::from_secs(PAIRING_TTL_SECONDS);
+        pairing.failed_attempts = 0;
+        code
+    }
+
+    fn redeem_pairing_code(&self, provided: &str) -> Option<String> {
+        let mut pairing = self
+            .pairing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        if pairing.code.is_none()
+            || Instant::now() > pairing.expires_at
+            || pairing.failed_attempts >= MAX_PAIRING_ATTEMPTS
+        {
+            pairing.code = None;
+            return None;
+        }
+
+        let matches = pairing
+            .code
+            .as_deref()
+            .map(|expected| constant_time_equal(provided.trim().as_bytes(), expected.as_bytes()))
+            .unwrap_or(false);
+        if !matches {
+            pairing.failed_attempts = pairing.failed_attempts.saturating_add(1);
+            if pairing.failed_attempts >= MAX_PAIRING_ATTEMPTS {
+                pairing.code = None;
+            }
+            return None;
+        }
+
+        pairing.code = None;
+        Some((*self.access_token).clone())
     }
 }
 
@@ -82,6 +145,17 @@ struct HealthResponse {
     protocol: &'static str,
 }
 
+#[derive(Deserialize)]
+struct PairingRequest {
+    code: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingCredentials {
+    access_token: String,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientCommand {
@@ -101,6 +175,7 @@ pub fn start(state: RemoteHostState) {
     tauri::async_runtime::spawn(async move {
         let app = Router::new()
             .route("/health", get(health))
+            .route("/api/pair", post(pair_device))
             .route("/ws", get(websocket_upgrade))
             .route("/api/files", get(list_files))
             .route("/api/file", get(download_file).put(upload_file))
@@ -119,6 +194,16 @@ pub fn start(state: RemoteHostState) {
             eprintln!("RemoteCanvas host stopped: {error}");
         }
     });
+}
+
+async fn pair_device(
+    State(state): State<RemoteHostState>,
+    Json(request): Json<PairingRequest>,
+) -> Response {
+    match state.redeem_pairing_code(&request.code) {
+        Some(access_token) => Json(PairingCredentials { access_token }).into_response(),
+        None => (StatusCode::UNAUTHORIZED, "コードが無効または期限切れです").into_response(),
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -500,8 +585,19 @@ fn apply_input(command: ClientCommand) {
 
 #[cfg(test)]
 mod tests {
-    use super::{constant_time_equal, is_tailscale_address};
-    use std::net::{IpAddr, Ipv4Addr};
+    use super::{constant_time_equal, is_tailscale_address, PairingSession, RemoteHostState};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        sync::{Arc, Mutex},
+    };
+
+    fn state() -> RemoteHostState {
+        RemoteHostState {
+            access_token: Arc::new("persistent-secret-token-for-tests".into()),
+            endpoint: Arc::new("http://100.64.0.1:47831".into()),
+            pairing: Arc::new(Mutex::new(PairingSession::inactive())),
+        }
+    }
 
     #[test]
     fn recognizes_tailscale_ipv4_range() {
@@ -524,6 +620,30 @@ mod tests {
         assert!(constant_time_equal(b"same-key", b"same-key"));
         assert!(!constant_time_equal(b"same-key", b"same-kex"));
         assert!(!constant_time_equal(b"short", b"longer"));
+    }
+
+    #[test]
+    fn pairing_code_is_six_digits_and_single_use() {
+        let state = state();
+        let code = state.begin_pairing();
+        assert_eq!(code.len(), 6);
+        assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+        assert_eq!(
+            state.redeem_pairing_code(&code).as_deref(),
+            Some("persistent-secret-token-for-tests")
+        );
+        assert!(state.redeem_pairing_code(&code).is_none());
+    }
+
+    #[test]
+    fn pairing_code_locks_after_five_failures() {
+        let state = state();
+        let code = state.begin_pairing();
+        let wrong_code = if code == "000000" { "000001" } else { "000000" };
+        for _ in 0..5 {
+            assert!(state.redeem_pairing_code(wrong_code).is_none());
+        }
+        assert!(state.redeem_pairing_code(&code).is_none());
     }
 }
 

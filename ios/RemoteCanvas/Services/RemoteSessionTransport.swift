@@ -99,6 +99,27 @@ final class LiveRemoteSession: RemoteSessionTransport {
         self.device = device
     }
 
+    static func exchangePairingCode(endpoint: String, code: String) async throws -> String {
+        guard var components = URLComponents(string: endpoint) else {
+            throw SessionError.invalidEndpoint
+        }
+        components.path = "/api/pair"
+        guard let url = components.url else { throw SessionError.invalidEndpoint }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(PairingRequest(code: code))
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw SessionError.server("Windowsから不正な応答を受信しました。")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw SessionError.server("コードが違うか、5分の有効期限が切れています。Windowsで新しいコードを発行してください。")
+        }
+        return try JSONDecoder().decode(PairingCredentials.self, from: data).accessToken
+    }
+
     func connect() async {
         guard socket == nil else { return }
         guard var components = URLComponents(string: device.endpoint) else {
@@ -253,4 +274,12 @@ final class LiveRemoteSession: RemoteSessionTransport {
             throw SessionError.server(message)
         }
     }
+}
+
+private struct PairingRequest: Encodable {
+    let code: String
+}
+
+private struct PairingCredentials: Decodable {
+    let accessToken: String
 }

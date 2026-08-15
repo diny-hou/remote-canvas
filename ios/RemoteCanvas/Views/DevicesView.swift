@@ -89,7 +89,7 @@ struct DevicesView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("端末認証が有効")
                     .font(.subheadline.bold())
-                Text("Face ID・Tailscale・192-bit接続キー")
+                Text("Face ID・Tailscale・端末別の秘密鍵")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

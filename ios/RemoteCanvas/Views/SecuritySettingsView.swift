@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SecuritySettingsView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         @Bindable var appModel = appModel
@@ -32,9 +33,26 @@ struct SecuritySettingsView: View {
                     LabeledContent("プロトコル", value: "remote-canvas/1")
                     LabeledContent("接続キー", value: "Keychainに保存")
                 }
+
+                Section {
+                    LabeledContent("バージョン", value: appVersion)
+                    Button {
+                        openURL(URL(string: "https://github.com/diny-hou/remote-canvas/releases/latest")!)
+                    } label: {
+                        Label("アップデートを確認", systemImage: "arrow.down.circle")
+                    }
+                } header: {
+                    Text("アプリ")
+                } footer: {
+                    Text("Windows版の最新版を開きます。iPhone/iPad版の自動更新にはTestFlightまたはApp Store配布が必要です。")
+                }
             }
             .navigationTitle("セキュリティ")
         }
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "不明"
     }
 }
 

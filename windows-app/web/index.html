@@ -20,7 +20,10 @@
           <button class="nav-item">端末</button>
           <button class="nav-item">セキュリティ</button>
         </nav>
-        <div class="version" id="version">0.2.0</div>
+        <div class="sidebar-footer">
+          <div class="version">v<span id="version">0.3.0</span></div>
+          <button class="update-button" id="update-button">アップデートを確認</button>
+        </div>
       </aside>
 
       <main>
@@ -52,7 +55,7 @@
               <div class="icon shield">✓</div>
               <div>
                 <h3>アクセス認証</h3>
-                <p>192-bit接続キーを照合</p>
+                <p>一時コードで安全に端末登録</p>
               </div>
             </div>
             <dl>
@@ -80,11 +83,16 @@
         </div>
 
         <section class="pairing-card hidden" id="pairing-card" aria-live="polite">
-          <div>
-            <p class="eyebrow">DEVICE ACCESS KEY</p>
-            <p>接続先: <code id="pairing-endpoint">---</code></p>
-            <p class="token-line">接続キー: <code id="pairing-token">---</code></p>
-            <p>iPhoneの「PCを追加」に接続先と接続キーを入力してください。</p>
+          <div class="pairing-qr" id="pairing-qr" aria-label="端末追加QRコード"></div>
+          <div class="pairing-copy">
+            <p class="eyebrow">端末を追加</p>
+            <h2 id="pairing-code">------</h2>
+            <p>iPhone/iPadでQRを読み取るか、6桁コードを入力してください。</p>
+            <p class="pairing-expiry">コードは<span id="pairing-expiry">5分</span>で期限切れになります。</p>
+            <details>
+              <summary>手動入力用の接続先</summary>
+              <code id="pairing-endpoint">---</code>
+            </details>
           </div>
           <button class="secondary" id="close-pairing">閉じる</button>
         </section>

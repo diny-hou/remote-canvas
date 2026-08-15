@@ -31,6 +31,8 @@
 	<string>Windows PCの画面・ファイルへ安全に接続するため、ローカルネットワークを使用します。</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>登録済みWindows PCへの接続を本人だけに許可するために使用します。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Windows版に表示された端末追加用QRコードを読み取るために使用します。</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

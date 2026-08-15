@@ -5,10 +5,13 @@ const elements = {
   accessKeyStatus: document.querySelector("#access-key-status"),
   transport: document.querySelector("#transport"),
   endpoint: document.querySelector("#endpoint"),
+  updateButton: document.querySelector("#update-button"),
   pairButton: document.querySelector("#pair-button"),
   pairingCard: document.querySelector("#pairing-card"),
+  pairingQr: document.querySelector("#pairing-qr"),
+  pairingCode: document.querySelector("#pairing-code"),
   pairingEndpoint: document.querySelector("#pairing-endpoint"),
-  pairingToken: document.querySelector("#pairing-token"),
+  pairingExpiry: document.querySelector("#pairing-expiry"),
   closePairing: document.querySelector("#close-pairing"),
   error: document.querySelector("#error-message")
 };
@@ -43,8 +46,18 @@ elements.pairButton.addEventListener("click", async () => {
   try {
     const response = await invoke("begin_pairing");
     elements.pairingEndpoint.textContent = response.endpoint;
-    elements.pairingToken.textContent = response.accessToken;
+    elements.pairingCode.textContent = response.pairingCode;
+    elements.pairingQr.innerHTML = response.qrSvg;
+    elements.pairingExpiry.textContent = `${Math.round(response.expiresInSeconds / 60)}分`;
     elements.pairingCard.classList.remove("hidden");
+  } catch (error) {
+    showError(String(error));
+  }
+});
+
+elements.updateButton.addEventListener("click", async () => {
+  try {
+    await invoke("open_update_page");
   } catch (error) {
     showError(String(error));
   }

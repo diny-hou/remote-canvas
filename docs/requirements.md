@@ -1,6 +1,6 @@
 # RemoteCanvas requirements
 
-Status: working MVP 0.2
+Status: working MVP 0.3
 
 ## Implemented
 
@@ -13,6 +13,8 @@ Status: working MVP 0.2
 - Random 192-bit access key, Authorization-header authentication, ThisDeviceOnly
   Keychain storage, and owner authentication before connection.
 - Responsive compact and regular-width layouts.
+- QR pairing and a five-minute, six-digit fallback code with attempt limiting.
+- In-app update links and tagged private GitHub releases for Windows installers.
 
 ## Required before production use
 
@@ -20,12 +22,13 @@ Status: working MVP 0.2
   replay protection, and a security audit.
 - Hardware video encoding, adaptive bitrate, congestion control, and reconnect.
 - Explicit Windows session consent and local security event logging.
-- Background-service lifecycle, code signing, automatic updates, and recovery.
+- Background-service lifecycle, production code signing, unattended updates,
+  and recovery.
 - Automated protocol, authorization, file-boundary, and end-to-end tests.
 
 ## Deferred product features
 
 - Audio, clipboard, multi-monitor, UAC/secure desktop, gaming optimization.
-- QR pairing and automatic endpoint discovery.
+- Automatic endpoint discovery without scanning.
 - UI Automation-based semantic reconstruction of supported apps.
 - App Store/TestFlight distribution and Windows installer signing.
