@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RemoteCanvas Host</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="brand-mark" aria-hidden="true">RC</div>
+        <div>
+          <strong>RemoteCanvas</strong>
+          <span>Windows Host</span>
+        </div>
+        <nav aria-label="設定カテゴリー">
+          <button class="nav-item active">概要</button>
+          <button class="nav-item">端末</button>
+          <button class="nav-item">セキュリティ</button>
+        </nav>
+        <div class="version" id="version">0.1.0</div>
+      </aside>
+
+      <main>
+        <header>
+          <div>
+            <p class="eyebrow">WINDOWS HOST</p>
+            <h1>このPCへ安全に接続</h1>
+            <p class="subtitle">登録済みのiPhone・iPadだけが接続できます。</p>
+          </div>
+          <div class="status-pill"><i></i><span id="service-state">準備完了</span></div>
+        </header>
+
+        <section class="hero-card">
+          <div class="computer-icon" aria-hidden="true">
+            <div class="screen"><span></span></div>
+            <div class="stand"></div>
+          </div>
+          <div class="hero-copy">
+            <span class="label">PC名</span>
+            <h2 id="host-name">Home PC</h2>
+            <p>直接接続を優先・エンドツーエンド暗号化</p>
+          </div>
+          <button class="primary" id="pair-button">端末を追加</button>
+        </section>
+
+        <div class="grid">
+          <section class="card">
+            <div class="card-heading">
+              <div class="icon shield">✓</div>
+              <div>
+                <h3>端末認証</h3>
+                <p>未登録端末を拒否</p>
+              </div>
+            </div>
+            <dl>
+              <div><dt>登録端末</dt><dd id="paired-devices">0台</dd></div>
+              <div><dt>認証方式</dt><dd>公開鍵＋生体認証</dd></div>
+              <div><dt>プロトコル</dt><dd>remote-canvas/1</dd></div>
+            </dl>
+          </section>
+
+          <section class="card">
+            <div class="card-heading">
+              <div class="icon network">↗</div>
+              <div>
+                <h3>接続経路</h3>
+                <p>P2Pを最優先</p>
+              </div>
+            </div>
+            <div class="route">
+              <span>iPhone / iPad</span>
+              <div class="route-line"><i></i></div>
+              <span>このPC</span>
+            </div>
+            <p class="footnote" id="transport">WebRTCバックエンド準備中</p>
+          </section>
+        </div>
+
+        <section class="pairing-card hidden" id="pairing-card" aria-live="polite">
+          <div>
+            <p class="eyebrow">ONE-TIME PAIRING CODE</p>
+            <h2 id="pairing-code">------</h2>
+            <p>iPhoneの「PCを追加」からこのコードを入力してください。</p>
+          </div>
+          <button class="secondary" id="close-pairing">閉じる</button>
+        </section>
+
+        <p class="error hidden" id="error-message"></p>
+      </main>
+    </div>
+  </body>
+</html>

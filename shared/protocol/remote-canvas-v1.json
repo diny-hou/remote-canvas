@@ -1,0 +1,34 @@
+{
+  "protocol": "remote-canvas/1",
+  "messages": [
+    {
+      "type": "pair.request",
+      "pairingId": "c845e3d6-f33d-4dda-8bf9-90555256ea3f",
+      "clientName": "Takumi's iPhone",
+      "clientIdentity": "base64url-p256-public-key",
+      "oneTimeProof": "six-word-or-qr-secret"
+    },
+    {
+      "type": "pair.accept",
+      "hostId": "a4d5de90-43a9-4bbf-a28b-121086673189",
+      "hostName": "Home PC",
+      "hostIdentity": "base64url-p256-public-key",
+      "expiresAt": "2026-08-15T12:00:00Z"
+    },
+    {
+      "type": "session.offer",
+      "sessionId": "d3a42473-3f17-492c-97b9-5e5635f96713",
+      "clientId": "registered-client-id",
+      "transportFingerprint": "sha256-fingerprint",
+      "capabilities": ["video.h264", "input.pointer", "input.text", "ui.semantic-v1"],
+      "signature": "base64url-device-signature"
+    },
+    {
+      "type": "input.pointer",
+      "sequence": 42,
+      "x": 0.42,
+      "y": 0.31,
+      "action": "primaryClick"
+    }
+  ]
+}
