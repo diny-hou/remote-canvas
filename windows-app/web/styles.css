@@ -134,5 +134,7 @@ dt { color: #708591; } dd { margin: 0; color: #c8d8df; }
 .pairing-card { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; padding: 22px 24px; }
 .pairing-card h2 { margin: 0; color: #7bf3fb; font: 800 32px/1.1 ui-monospace, monospace; letter-spacing: .18em; }
 .pairing-card p:last-child { margin: 7px 0 0; color: #7c919c; font-size: 12px; }
+.pairing-card code { color: #c7faff; font: 600 12px/1.5 ui-monospace, monospace; user-select: all; }
+.pairing-card .token-line { max-width: 680px; overflow-wrap: anywhere; }
 .hidden { display: none !important; }
 .error { padding: 12px; border-radius: 10px; color: #ffb3b3; background: rgba(255, 72, 72, .10); }

@@ -1,23 +1,41 @@
 # RemoteCanvas
 
-RemoteCanvas is an iPhone/iPad-first remote workspace for a paired Windows PC.
-The product goal is not to shrink a desktop onto a phone, but to offer two
-complementary views:
+RemoteCanvas is an iPhone/iPad-first remote client for a Windows PC. Version
+0.2 is a working MVP: the Windows host captures its primary display, streams
+JPEG frames to iOS, accepts pointer/text/scroll input, and exposes selected user
+folders through an authenticated file API.
 
-- **Mobile workspace** — touch-sized controls and a focused, single-app layout.
-- **Desktop view** — the original Windows desktop with pan, zoom, and trackpad input.
+## What works in 0.2
 
-This repository contains the first vertical prototype:
+- Live Windows screen viewing on iPhone and iPad.
+- Tap, pointer movement, right-click, scrolling, and text entry.
+- Native iOS browsing of Desktop, Documents, Downloads, Pictures, and Videos.
+- Download and Quick Look preview of supported images, videos, audio, PDFs, and
+  documents.
+- Upload from the iOS Files picker without overwriting an existing file.
+- 192-bit random host access key, Bearer authentication, iOS Keychain storage,
+  and Face ID/Touch ID/device-passcode approval before connection.
+- Remote access through Tailscale. RemoteCanvas itself needs no hosted server;
+  Tailscale normally connects peers directly with WireGuard and may use its own
+  encrypted relay when direct NAT traversal is impossible.
 
-- `ios/` — a buildable SwiftUI application with pairing, device management, and
-  an interactive mock remote session.
-- `windows-host/` — a dependency-free C++ capture/service skeleton.
-- `windows-app/` — the Tauri 2 Windows settings and pairing shell, with NSIS
-  installer scripts and a Windows CI build.
-- `shared/protocol/` — versioned wire-message examples shared by both clients.
-- `docs/` — product requirements and architecture decisions.
+## Connect a Windows PC
 
-## Build the iOS prototype
+1. Install Tailscale on Windows and iPhone/iPad and sign both into the same
+   tailnet.
+2. Install and open **RemoteCanvas Host** on Windows. Allow its Windows Firewall
+   prompt for the network profiles you intend to use.
+3. Select **端末を追加** and copy the displayed endpoint and 48-character key.
+   When Tailscale is running, RemoteCanvas prefers its `100.64.0.0/10` address.
+4. On iPhone/iPad, choose **PCを追加** and enter those two values.
+5. Approve Face ID/Touch ID/device passcode, then connect.
+
+An `http://100.x.x.x:47831` endpoint is still encrypted by the surrounding
+Tailscale WireGuard tunnel. A normal LAN `http://192.168.x.x:47831` endpoint is
+not transport-encrypted by RemoteCanvas and should only be used on a trusted
+private network.
+
+## Build iOS
 
 ```sh
 xcodebuild \
@@ -28,30 +46,19 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-Open `ios/RemoteCanvas.xcodeproj` in Xcode to run it on an iPhone or iPad
-Simulator. The bundled demo PC lets the complete prototype flow run without a
-Windows machine.
+Open `ios/RemoteCanvas.xcodeproj` in Xcode for a signed physical-device build.
 
-## Build the host skeleton
+## Build Windows
 
-```sh
-cmake -S windows-host -B work/windows-host-build
-cmake --build work/windows-host-build
-work/windows-host-build/remote_canvas_host --demo
-```
+See `windows-app/README.md`. GitHub Actions also produces the NSIS installer
+artifact through `.github/workflows/build-windows.yml`.
 
-The current host validates configuration and exposes the intended capture,
-transport, and device-registry seams. Desktop capture and WebRTC are the next
-implementation milestone. If CMake is unavailable, the same skeleton can be
-checked directly with a C++20 compiler:
+## Current limitations
 
-```sh
-clang++ -std=c++20 -Wall -Wextra -Wpedantic \
-  -I windows-host/include \
-  windows-host/src/main.cpp windows-host/src/host.cpp \
-  -o remote_canvas_host
-./remote_canvas_host --demo
-```
-
-See `windows-app/README.md` to create `RemoteCanvas Host_x64-setup.exe` on a
-Windows 11 machine.
+This is not yet a production substitute for Splashtop or Windows App. The
+screen stream is approximately 8 JPEG frames per second, carries no audio, and
+supports only the primary monitor. UAC/secure-desktop interaction, clipboard,
+QR pairing, per-client key revocation, H.264/HEVC, and semantic reconstruction
+of arbitrary Windows application UI remain future work. The phone-friendly
+file browser is native today; arbitrary app UIs are still operated through the
+pixel stream.

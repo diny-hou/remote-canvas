@@ -1,5 +1,7 @@
 import Foundation
+import LocalAuthentication
 import Observation
+import Security
 
 @MainActor
 @Observable
@@ -14,23 +16,25 @@ final class AppModel {
     var presentedSheet: PresentedSheet?
     var activeDevice: PairedDevice?
     var requireOwnerAuthentication = true
-    var preferDirectConnection = true
-    var allowRelayFallback = false
 
-    init(devices: [PairedDevice] = [.demo]) {
-        self.devices = devices
+    init(devices: [PairedDevice]? = nil) {
+        self.devices = devices ?? SecureDeviceStore.load()
     }
 
-    func registerDemoDevice(name: String, code: String) throws {
-        let normalizedCode = code
+    func registerDevice(name: String, endpoint: String, accessToken: String) throws {
+        let normalizedToken = accessToken
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
+        let normalizedEndpoint = endpoint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        guard normalizedCode.count >= 6 else {
+        guard normalizedToken.count >= 12,
+              let url = URL(string: normalizedEndpoint),
+              ["http", "https"].contains(url.scheme?.lowercased()) else {
             throw PairingError.invalidCode
         }
 
-        let suffix = normalizedCode.unicodeScalars
+        let suffix = normalizedToken.unicodeScalars
             .map { String(format: "%02X", $0.value) }
             .joined()
             .suffix(12)
@@ -44,12 +48,23 @@ final class AppModel {
             PairedDevice(
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Windows PC" : name,
                 fingerprint: fingerprint,
+                endpoint: normalizedEndpoint,
+                accessToken: normalizedToken,
                 availability: .online
             )
         )
+        persistDevices()
     }
 
-    func connect(to device: PairedDevice) {
+    func connect(to device: PairedDevice) async throws {
+        if requireOwnerAuthentication {
+            let context = LAContext()
+            context.localizedCancelTitle = "キャンセル"
+            try await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "登録済みWindows PCへ接続します"
+            )
+        }
         activeDevice = device
     }
 
@@ -59,6 +74,11 @@ final class AppModel {
 
     func forget(_ device: PairedDevice) {
         devices.removeAll { $0.id == device.id }
+        persistDevices()
+    }
+
+    private func persistDevices() {
+        SecureDeviceStore.save(devices)
     }
 }
 
@@ -68,7 +88,48 @@ enum PairingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCode:
-            "ペアリングコードは6文字以上で入力してください。"
+            "接続先URLと12文字以上の接続キーを確認してください。"
+        }
+    }
+}
+
+private enum SecureDeviceStore {
+    private static let service = "jp.remote-canvas.app.paired-devices"
+    private static let account = "default"
+
+    static func load() -> [PairedDevice] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let devices = try? JSONDecoder().decode([PairedDevice].self, from: data) else {
+            return []
+        }
+        return devices
+    }
+
+    static func save(_ devices: [PairedDevice]) {
+        guard let data = try? JSONEncoder().encode(devices) else { return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            attributes.forEach { item[$0.key] = $0.value }
+            SecItemAdd(item as CFDictionary, nil)
         }
     }
 }

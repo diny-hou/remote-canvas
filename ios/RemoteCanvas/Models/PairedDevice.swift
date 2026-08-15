@@ -10,6 +10,8 @@ struct PairedDevice: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     var name: String
     var fingerprint: String
+    var endpoint: String
+    var accessToken: String
     var availability: Availability
     var lastSeen: Date
 
@@ -17,12 +19,16 @@ struct PairedDevice: Identifiable, Hashable, Codable, Sendable {
         id: UUID = UUID(),
         name: String,
         fingerprint: String,
+        endpoint: String,
+        accessToken: String,
         availability: Availability,
         lastSeen: Date = .now
     ) {
         self.id = id
         self.name = name
         self.fingerprint = fingerprint
+        self.endpoint = endpoint
+        self.accessToken = accessToken
         self.availability = availability
         self.lastSeen = lastSeen
     }
@@ -33,6 +39,8 @@ extension PairedDevice {
         id: UUID(uuidString: "A4D5DE90-43A9-4BBF-A28B-121086673189")!,
         name: "Home PC",
         fingerprint: "93:7A:20:5E:71:AC",
+        endpoint: "http://100.64.0.2:47831",
+        accessToken: "preview-access-token",
         availability: .online
     )
 }

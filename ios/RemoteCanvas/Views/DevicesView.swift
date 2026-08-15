@@ -46,7 +46,7 @@ struct DevicesView: View {
                     .foregroundStyle(.cyan)
                 Text("Windowsを、\n手の中のワークスペースに。")
                     .font(.largeTitle.bold())
-                Text("登録済み端末だけが、エンドツーエンド暗号化されたセッションを開始できます。")
+                Text("Tailscaleの端末認証とRemoteCanvas接続キーの両方で、Windowsへの接続を制限します。")
                     .foregroundStyle(.secondary)
                 securityBanner
                 Spacer()
@@ -89,7 +89,7 @@ struct DevicesView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("端末認証が有効")
                     .font(.subheadline.bold())
-                Text("未登録の端末からは接続できません")
+                Text("Face ID・Tailscale・192-bit接続キー")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -103,6 +103,7 @@ struct DevicesView: View {
 private struct DeviceCard: View {
     @Environment(AppModel.self) private var appModel
     let device: PairedDevice
+    @State private var connectionError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -144,7 +145,13 @@ private struct DeviceCard: View {
             }
 
             Button {
-                appModel.connect(to: device)
+                Task {
+                    do {
+                        try await appModel.connect(to: device)
+                    } catch {
+                        connectionError = error.localizedDescription
+                    }
+                }
             } label: {
                 Label("安全に接続", systemImage: "arrow.right.circle.fill")
                     .frame(maxWidth: .infinity)
@@ -160,6 +167,14 @@ private struct DeviceCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: 22)
                 .stroke(.primary.opacity(0.06))
+        }
+        .alert("接続を開始できません", isPresented: Binding(
+            get: { connectionError != nil },
+            set: { if !$0 { connectionError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(connectionError ?? "本人確認に失敗しました。")
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "remote-canvas-host"
-version = "0.1.0"
+version = "0.2.0"
 description = "RemoteCanvas Windows host shell"
 authors = ["RemoteCanvas"]
 edition = "2021"
@@ -14,5 +14,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+axum = { version = "0.8", features = ["ws"] }
+local-ip-address = "0.6"
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "fs", "io-util"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+screenshots = "0.8"

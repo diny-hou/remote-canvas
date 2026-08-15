@@ -15,25 +15,22 @@ struct SecuritySettingsView: View {
                 } header: {
                     Text("接続承認")
                 } footer: {
-                    Text("本番実装では、Secure Enclave内の端末鍵を使用する前に本人確認を要求します。")
+                    Text("接続開始前にFace ID、Touch ID、または端末パスコードで本人確認します。")
                 }
 
                 Section {
-                    Toggle(isOn: $appModel.preferDirectConnection) {
-                        Label("P2P接続を優先", systemImage: "point.3.connected.trianglepath.dotted")
-                    }
-                    Toggle(isOn: $appModel.allowRelayFallback) {
-                        Label("暗号化リレーを許可", systemImage: "arrow.triangle.branch")
-                    }
+                    Label("Tailscale / LANで直接接続", systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("RemoteCanvas独自サーバー不使用", systemImage: "server.rack")
                 } header: {
                     Text("ネットワーク")
                 } footer: {
-                    Text("リレーは直接接続できない場合だけ使います。中継先はセッション内容を復号できません。")
+                    Text("外出先ではTailscaleのWireGuard暗号化を使います。現在の版に独自リレー機能はありません。")
                 }
 
                 Section("信頼済み端末") {
                     LabeledContent("登録PC", value: "\(appModel.devices.count)台")
                     LabeledContent("プロトコル", value: "remote-canvas/1")
+                    LabeledContent("接続キー", value: "Keychainに保存")
                 }
             }
             .navigationTitle("セキュリティ")

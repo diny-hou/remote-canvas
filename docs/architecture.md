@@ -1,47 +1,50 @@
 # Architecture
 
-## Components
+## Implemented 0.2 data path
 
-1. **RemoteCanvas iOS client**
-   - SwiftUI application shell and adaptive interaction layer.
-   - Metal/VideoToolbox renderer in the production implementation.
-   - Secure device identity, pairing UX, and session control.
-2. **RemoteCanvas Windows host**
-   - Tauri 2 user-facing configuration and pairing shell.
-   - Native Rust/C++ capture process plus a least-privilege background service.
-   - DXGI Desktop Duplication capture and Media Foundation encoding.
-   - UI Automation semantic adapter and `SendInput` input adapter.
-3. **Connection plane**
-   - WebRTC ICE/STUN for direct connectivity.
-   - Authenticated signaling for offers and candidates.
-   - Optional TURN fallback; media remains end-to-end encrypted.
+```text
+iPhone / iPad                       Windows PC
+-----------------                   ------------------------
+SwiftUI live canvas  <--- JPEG ---- Axum WebSocket :47831
+touch/text/scroll    ---- JSON ---> screenshots + enigo
+native file browser <--- HTTP ----> allowlisted user folders
+Keychain + Face ID                  192-bit persisted key
+          \________ Tailscale WireGuard tunnel ________/
+```
 
-## Trust model
+The Windows UI is Tauri, but capture and input run in Rust rather than the web
+view. Every WebSocket and file request requires the same high-entropy key. The
+key travels in an Authorization header, not the URL. iOS stores paired records
+in a ThisDeviceOnly Keychain item and requests owner authentication before a
+session opens.
 
-Pairing is the trust root. Each endpoint creates a device identity and pins the
-other endpoint's public identity. Every session authenticates a transcript that
-includes the protocol version, both device IDs, both ephemeral session values,
-and the transport fingerprint. This prevents a signaling service from replacing
-transport identities.
+Tailscale supplies authenticated device membership, NAT traversal, and
+transport encryption. RemoteCanvas itself has no hosted control or data plane.
+Tailscale can use its encrypted DERP infrastructure when peers cannot establish
+a direct path, so the connection is not guaranteed to be physically P2P in all
+network conditions.
 
-The prototype deliberately keeps transport behind a service boundary. Mock
-frames and state can be replaced without moving session rules into SwiftUI.
+## Adaptive presentation
 
-## Adaptive display pipeline
+The native iOS file browser is the first semantic mobile view: folders and
+files become touch-sized rows, and media opens through Quick Look. The general
+Windows application surface currently remains a scaled pixel stream with
+phone-sized controls for input, right-click, scrolling, and switching display
+mode.
 
-The mobile workspace combines three sources in priority order:
+Future semantic reconstruction would add a Windows UI Automation channel and
+map known controls into native SwiftUI components. It must always retain the
+pixel-stream fallback because games, canvases, video, and custom-rendered apps
+cannot be reliably reconstructed.
 
-1. UI Automation elements converted into native touch-sized controls.
-2. Window metadata used to focus and arrange a single application.
-3. Encoded pixels for custom-drawn or otherwise uninterpretable content.
+## Next production architecture
 
-The desktop view always remains available, ensuring compatibility when semantic
-metadata is incomplete.
-
-## Why Tauri is only the Windows shell
-
-Tauri is appropriate for host settings, pairing, device revocation, diagnostics,
-and installer generation. Desktop capture, input injection, device-key access,
-and service lifecycle must stay in native Rust/C++ components. Keeping these
-privileged operations outside the webview makes the security boundary smaller
-and permits the capture service to run even when the settings window is closed.
+- Replace JPEG frames with hardware H.264/HEVC and adaptive bitrate.
+- Give every client its own public/private identity and revocation record.
+- Use a short-lived pairing ceremony instead of revealing the persistent host
+  key.
+- Add replay-resistant session handshakes and key rotation.
+- Run capture in a least-privilege Windows service with explicit consent and
+  auditable session events.
+- Add UI Automation metadata, clipboard policy, audio, and multi-monitor
+  selection as independently permissioned channels.

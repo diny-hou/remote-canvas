@@ -1,24 +1,36 @@
 import SwiftUI
+import UIKit
 
 struct RemoteWorkspaceView: View {
     let mode: RemoteDisplayMode
+    let frameData: Data?
     let pointer: CGPoint
     let onPointerEvent: (PointerEvent) -> Void
 
     var body: some View {
         GeometryReader { proxy in
+            let interactionRect = contentRect(in: proxy.size)
             ZStack {
-                switch mode {
-                case .mobile:
-                    MobileWorkspaceSurface()
-                case .desktop:
-                    DesktopWorkspaceSurface()
+                if let frameData, let image = UIImage(data: frameData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .interpolation(.low)
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.black)
+                } else {
+                    switch mode {
+                    case .mobile:
+                        MobileWorkspaceSurface()
+                    case .desktop:
+                        DesktopWorkspaceSurface()
+                    }
                 }
 
-                pointerView(in: proxy.size)
+                pointerView(in: interactionRect)
             }
             .contentShape(Rectangle())
-            .gesture(pointerGesture(size: proxy.size))
+            .gesture(pointerGesture(in: interactionRect))
             .simultaneousGesture(
                 TapGesture(count: 2).onEnded {
                     onPointerEvent(PointerEvent(normalizedLocation: pointer, action: .primaryClick))
@@ -27,35 +39,49 @@ struct RemoteWorkspaceView: View {
         }
     }
 
-    private func pointerView(in size: CGSize) -> some View {
+    private func pointerView(in rect: CGRect) -> some View {
         Image(systemName: "cursorarrow")
             .font(.title2)
             .foregroundStyle(.white, .black)
             .shadow(radius: 2)
             .position(
-                x: max(0, min(size.width, pointer.x * size.width)),
-                y: max(0, min(size.height, pointer.y * size.height))
+                x: rect.minX + max(0, min(rect.width, pointer.x * rect.width)),
+                y: rect.minY + max(0, min(rect.height, pointer.y * rect.height))
             )
             .allowsHitTesting(false)
     }
 
-    private func pointerGesture(size: CGSize) -> some Gesture {
+    private func pointerGesture(in rect: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let location = CGPoint(
-                    x: max(0, min(1, value.location.x / max(size.width, 1))),
-                    y: max(0, min(1, value.location.y / max(size.height, 1)))
+                    x: max(0, min(1, (value.location.x - rect.minX) / max(rect.width, 1))),
+                    y: max(0, min(1, (value.location.y - rect.minY) / max(rect.height, 1)))
                 )
                 onPointerEvent(PointerEvent(normalizedLocation: location, action: .move))
             }
             .onEnded { value in
                 guard abs(value.translation.width) < 6, abs(value.translation.height) < 6 else { return }
                 let location = CGPoint(
-                    x: max(0, min(1, value.location.x / max(size.width, 1))),
-                    y: max(0, min(1, value.location.y / max(size.height, 1)))
+                    x: max(0, min(1, (value.location.x - rect.minX) / max(rect.width, 1))),
+                    y: max(0, min(1, (value.location.y - rect.minY) / max(rect.height, 1)))
                 )
                 onPointerEvent(PointerEvent(normalizedLocation: location, action: .primaryClick))
             }
+    }
+
+    private func contentRect(in container: CGSize) -> CGRect {
+        guard let frameData, let image = UIImage(data: frameData), image.size.width > 0, image.size.height > 0 else {
+            return CGRect(origin: .zero, size: container)
+        }
+        let scale = min(container.width / image.size.width, container.height / image.size.height)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        return CGRect(
+            x: (container.width - size.width) / 2,
+            y: (container.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
     }
 }
 
@@ -202,7 +228,7 @@ private struct DesktopWorkspaceSurface: View {
 }
 
 #Preview("Mobile workspace") {
-    RemoteWorkspaceView(mode: .mobile, pointer: CGPoint(x: 0.6, y: 0.4)) { _ in }
+    RemoteWorkspaceView(mode: .mobile, frameData: nil, pointer: CGPoint(x: 0.6, y: 0.4)) { _ in }
         .frame(width: 390, height: 650)
         .preferredColorScheme(.dark)
 }

@@ -2,11 +2,13 @@ const elements = {
   version: document.querySelector("#version"),
   serviceState: document.querySelector("#service-state"),
   hostName: document.querySelector("#host-name"),
-  pairedDevices: document.querySelector("#paired-devices"),
+  accessKeyStatus: document.querySelector("#access-key-status"),
   transport: document.querySelector("#transport"),
+  endpoint: document.querySelector("#endpoint"),
   pairButton: document.querySelector("#pair-button"),
   pairingCard: document.querySelector("#pairing-card"),
-  pairingCode: document.querySelector("#pairing-code"),
+  pairingEndpoint: document.querySelector("#pairing-endpoint"),
+  pairingToken: document.querySelector("#pairing-token"),
   closePairing: document.querySelector("#close-pairing"),
   error: document.querySelector("#error-message")
 };
@@ -29,8 +31,9 @@ async function loadStatus() {
     elements.version.textContent = status.version;
     elements.serviceState.textContent = status.serviceState;
     elements.hostName.textContent = status.hostName;
-    elements.pairedDevices.textContent = `${status.pairedDevices}台`;
+    elements.accessKeyStatus.textContent = status.accessKeyConfigured ? "設定済み" : "未設定";
     elements.transport.textContent = status.transport;
+    elements.endpoint.textContent = status.endpoint;
   } catch (error) {
     showError(String(error));
   }
@@ -39,7 +42,8 @@ async function loadStatus() {
 elements.pairButton.addEventListener("click", async () => {
   try {
     const response = await invoke("begin_pairing");
-    elements.pairingCode.textContent = response.code;
+    elements.pairingEndpoint.textContent = response.endpoint;
+    elements.pairingToken.textContent = response.accessToken;
     elements.pairingCard.classList.remove("hidden");
   } catch (error) {
     showError(String(error));

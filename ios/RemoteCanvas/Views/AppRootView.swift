@@ -24,7 +24,7 @@ struct AppRootView: View {
             }
         }
         .fullScreenCover(item: $appModel.activeDevice) { device in
-            RemoteSessionView(device: device, transport: PreviewRemoteSessionTransport())
+            RemoteSessionView(device: device, transport: LiveRemoteSession(device: device))
         }
     }
 }
