@@ -14,6 +14,9 @@ struct HostStatus {
     endpoint: String,
     lan_endpoint: String,
     tailscale_endpoint: Option<String>,
+    session_device: Option<String>,
+    session_via: Option<String>,
+    device_count: usize,
 }
 
 #[derive(Serialize)]
@@ -33,6 +36,7 @@ fn host_name() -> String {
 #[tauri::command]
 fn host_status(state: tauri::State<'_, RemoteHostState>) -> HostStatus {
     let endpoints = discover_endpoints();
+    let session = state.active_session();
     HostStatus {
         version: env!("CARGO_PKG_VERSION"),
         service_state: state.service_state(),
@@ -40,6 +44,9 @@ fn host_status(state: tauri::State<'_, RemoteHostState>) -> HostStatus {
         endpoint: endpoints.lan.clone(),
         lan_endpoint: endpoints.lan,
         tailscale_endpoint: endpoints.tailscale,
+        session_device: session.as_ref().map(|(name, _)| name.clone()),
+        session_via: session.as_ref().map(|(_, via)| via.clone()),
+        device_count: state.device_count(),
     }
 }
 
@@ -80,6 +87,11 @@ async fn rotate_keys(state: tauri::State<'_, RemoteHostState>) -> Result<(), Str
 }
 
 #[tauri::command]
+async fn check_update() -> Result<updater::UpdateStatus, String> {
+    updater::check_latest(env!("CARGO_PKG_VERSION")).await
+}
+
+#[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<updater::UpdateStatus, String> {
     let result = updater::install_latest(env!("CARGO_PKG_VERSION")).await?;
     if result.status == "installing" {
@@ -103,6 +115,7 @@ pub fn run() {
             host_status,
             begin_pairing,
             rotate_keys,
+            check_update,
             install_update
         ])
         .run(tauri::generate_context!())

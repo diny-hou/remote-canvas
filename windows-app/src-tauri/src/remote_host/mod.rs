@@ -116,6 +116,13 @@ impl RemoteHostState {
         }
     }
 
+    pub fn active_session(&self) -> Option<(String, String)> {
+        lock(&self.inner)
+            .active
+            .as_ref()
+            .map(|session| (session.device_name.clone(), session.via.clone()))
+    }
+
     pub async fn rotate_keys(&self) -> Result<(), String> {
         {
             let mut inner = lock(&self.inner);
@@ -369,15 +376,15 @@ struct StreamQuality {
 }
 
 const LAN_QUALITY: StreamQuality = StreamQuality {
-    interval_ms: 50,
-    jpeg_quality: 85,
-    max_width: 1920,
+    interval_ms: 33,
+    jpeg_quality: 58,
+    max_width: 1280,
 };
 
 const REMOTE_QUALITY: StreamQuality = StreamQuality {
-    interval_ms: 100,
-    jpeg_quality: 72,
-    max_width: 1440,
+    interval_ms: 50,
+    jpeg_quality: 48,
+    max_width: 960,
 };
 
 fn stream_quality(headers: &HeaderMap, addr: SocketAddr) -> (StreamQuality, &'static str) {
@@ -418,6 +425,7 @@ struct FileEntry {
 struct HealthResponse {
     status: &'static str,
     protocol: &'static str,
+    endpoints: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -528,6 +536,7 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         protocol: "remote-canvas/1",
+        endpoints: discover_endpoints().all(),
     })
 }
 
@@ -558,21 +567,43 @@ async fn websocket_upgrade(
 }
 
 async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
-    let mut frame_timer = tokio::time::interval(Duration::from_millis(quality.interval_ms));
-    frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(Vec::<u8>::new());
+    tokio::spawn(async move {
+        let mut frame_timer = tokio::time::interval(Duration::from_millis(quality.interval_ms));
+        frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            frame_timer.tick().await;
+            let captured = tokio::task::spawn_blocking(move || {
+                capture_primary_display(quality.max_width, quality.jpeg_quality)
+            })
+            .await;
+            match captured {
+                Ok(Ok(jpeg)) if !jpeg.is_empty() => {
+                    if frame_tx.send(jpeg).is_err() {
+                        break;
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {}
+                Ok(Ok(_)) => {}
+            }
+        }
+    });
+
     let mut ping_timer = tokio::time::interval(Duration::from_secs(5));
     ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
-            _ = frame_timer.tick() => {
-                let frame = tokio::task::spawn_blocking(move || {
-                    capture_primary_display(quality.max_width, quality.jpeg_quality)
-                }).await;
-                if let Ok(Ok(jpeg)) = frame {
-                    if socket.send(Message::Binary(jpeg.into())).await.is_err() {
-                        break;
-                    }
+            changed = frame_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let jpeg = frame_rx.borrow().clone();
+                if jpeg.is_empty() {
+                    continue;
+                }
+                if socket.send(Message::Binary(jpeg.into())).await.is_err() {
+                    break;
                 }
             }
             _ = ping_timer.tick() => {
@@ -584,7 +615,7 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(command) = serde_json::from_str::<ClientCommand>(&text) {
-                            let _ = tokio::task::spawn_blocking(move || apply_input(command)).await;
+                            apply_input(command);
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
@@ -754,48 +785,88 @@ fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 fn default_locations() -> Vec<FileEntry> {
-    allowed_roots()
-        .into_iter()
-        .map(|path| FileEntry {
-            name: path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Folder")
-                .to_string(),
-            path: path.to_string_lossy().into_owned(),
+    let mut entries = Vec::new();
+    if let Some(home) = user_home() {
+        entries.push(FileEntry {
+            name: "Home".into(),
+            path: home.to_string_lossy().into_owned(),
             is_directory: true,
             size: 0,
             modified_unix_seconds: 0,
-        })
-        .collect()
+        });
+    }
+    entries.extend(available_drives().into_iter().map(|path| FileEntry {
+        name: drive_label(&path),
+        path: path.to_string_lossy().into_owned(),
+        is_directory: true,
+        size: 0,
+        modified_unix_seconds: 0,
+    }));
+    entries
 }
 
-fn allowed_roots() -> Vec<PathBuf> {
-    let home = std::env::var("USERPROFILE")
+fn user_home() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
+        .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let names = ["Desktop", "Documents", "Downloads", "Pictures", "Videos"];
-
-    names
-        .into_iter()
-        .map(|name| home.join(name))
         .filter(|path| path.exists())
-        .filter_map(|path| path.canonicalize().ok())
-        .collect()
+}
+
+fn available_drives() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        (b'A'..=b'Z')
+            .filter_map(|letter| {
+                let root = PathBuf::from(format!("{}:\\", letter as char));
+                root.exists().then_some(root)
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/")]
+    }
+}
+
+fn drive_label(path: &Path) -> String {
+    let label = path.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    if label.is_empty() {
+        path.to_string_lossy().into_owned()
+    } else {
+        label
+    }
+}
+
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    text.strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or(path)
+}
+
+fn is_allowed_location(path: &Path) -> bool {
+    let text = strip_extended_prefix(path.to_path_buf());
+    let text = text.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let mut chars = text.chars();
+        matches!(chars.next(), Some(letter) if letter.is_ascii_alphabetic()) && chars.next() == Some(':')
+    }
+    #[cfg(not(windows))]
+    {
+        text.starts_with('/')
+    }
 }
 
 fn allowed_existing_path(raw_path: &str) -> Result<PathBuf, String> {
     let requested = PathBuf::from(raw_path)
         .canonicalize()
         .map_err(|error| format!("Cannot open requested path: {error}"))?;
-    if allowed_roots()
-        .iter()
-        .any(|root| requested.starts_with(root))
-    {
+    if is_allowed_location(&requested) {
         Ok(requested)
     } else {
-        Err("Access is limited to Desktop, Documents, Downloads, Pictures, and Videos".into())
+        Err("That location is not on a local drive".into())
     }
 }
 
@@ -875,11 +946,11 @@ fn capture_primary_display(_max_width: u32, _jpeg_quality: u8) -> Result<Vec<u8>
 
 #[cfg(target_os = "windows")]
 fn apply_input(command: ClientCommand) {
-    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
-
-    let Ok(mut enigo) = Enigo::new(&Settings::default()) else {
-        return;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN,
+        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
     };
+
     match command {
         ClientCommand::Pointer {
             x,
@@ -887,30 +958,99 @@ fn apply_input(command: ClientCommand) {
             action,
             delta,
         } => {
-            let display = primary_screen().ok().map(|screen| screen.display_info);
-            let (origin_x, origin_y, width, height) = display
-                .map(|display| (display.x, display.y, display.width, display.height))
-                .unwrap_or((0, 0, 1920, 1080));
-            let absolute_x = origin_x + (x.clamp(0.0, 1.0) * width as f64) as i32;
-            let absolute_y = origin_y + (y.clamp(0.0, 1.0) * height as f64) as i32;
-            let _ = enigo.move_mouse(absolute_x, absolute_y, Coordinate::Abs);
+            let (px, py) = screen_point(x, y);
             match action.as_str() {
+                "move" => send_mouse(px, py, 0, 0),
                 "primary_click" => {
-                    let _ = enigo.button(Button::Left, Direction::Click);
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTDOWN, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTUP, 0);
                 }
                 "secondary_click" => {
-                    let _ = enigo.button(Button::Right, Direction::Click);
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_RIGHTDOWN, 0);
+                    send_mouse(px, py, MOUSEEVENTF_RIGHTUP, 0);
+                }
+                "double_click" => {
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTDOWN, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTUP, 0);
+                    std::thread::sleep(Duration::from_millis(50));
+                    send_mouse(px, py, MOUSEEVENTF_LEFTDOWN, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTUP, 0);
                 }
                 "scroll" => {
-                    let _ = enigo.scroll(delta.round() as i32, Axis::Vertical);
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_WHEEL, delta.round() as i32 * 120);
                 }
-                _ => {}
+                "scroll_horizontal" => {
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_HWHEEL, delta.round() as i32 * 120);
+                }
+                _ => send_mouse(px, py, 0, 0),
             }
         }
-        ClientCommand::Text { text } => {
-            let _ = enigo.text(&text);
-        }
+        ClientCommand::Text { text } => type_text(&text),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn screen_point(x: f64, y: f64) -> (i32, i32) {
+    let display = primary_screen().ok().map(|screen| screen.display_info);
+    let (origin_x, origin_y, width, height) = display
+        .map(|display| (display.x, display.y, display.width, display.height))
+        .unwrap_or((0, 0, 1920, 1080));
+    (
+        origin_x + (x.clamp(0.0, 1.0) * width as f64) as i32,
+        origin_y + (y.clamp(0.0, 1.0) * height as f64) as i32,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn send_mouse(px: i32, py: i32, extra_flags: u32, mouse_data: i32) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+
+    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
+    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
+    let abs_x = ((i64::from(px - vx) * 65535) / i64::from(vw)) as i32;
+    let abs_y = ((i64::from(py - vy) * 65535) / i64::from(vh)) as i32;
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: abs_x,
+                dy: abs_y,
+                mouseData: mouse_data as u32,
+                dwFlags: MOUSEEVENTF_ABSOLUTE
+                    | MOUSEEVENTF_MOVE
+                    | MOUSEEVENTF_VIRTUALDESK
+                    | extra_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn type_text(text: &str) {
+    use enigo::{Enigo, Keyboard, Settings};
+    let Ok(mut enigo) = Enigo::new(&Settings::default()) else {
+        return;
+    };
+    let _ = enigo.text(text);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -933,9 +1073,8 @@ fn apply_input(command: ClientCommand) {
 #[cfg(test)]
 mod tests {
     use super::{
-        constant_time_equal, is_private_lan, is_tailscale_address, is_usable_lan,
-        is_virtual_interface, HostInner, PairingSession,
-        RemoteHostState,
+        constant_time_equal, is_allowed_location, is_private_lan, is_tailscale_address,
+        is_usable_lan, is_virtual_interface, HostInner, PairingSession, RemoteHostState,
     };
     use crate::remote_host::store::PersistedState;
     use axum::http::HeaderMap;
@@ -1016,6 +1155,21 @@ mod tests {
         headers.insert("x-rc-nonce", "0123456789abcdef0123456789abcdef".parse().unwrap());
         assert!(state.check_replay(&headers).is_ok());
         assert!(state.check_replay(&headers).is_err());
+    }
+
+    #[test]
+    fn classifies_local_drive_paths() {
+        #[cfg(windows)]
+        {
+            assert!(is_allowed_location(std::path::Path::new(r"C:\Users")));
+            assert!(is_allowed_location(std::path::Path::new(r"\\?\D:\data")));
+            assert!(!is_allowed_location(std::path::Path::new(r"\\server\share")));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(is_allowed_location(std::path::Path::new("/Users")));
+            assert!(!is_allowed_location(std::path::Path::new("relative")));
+        }
     }
 
     fn now_header() -> axum::http::HeaderValue {

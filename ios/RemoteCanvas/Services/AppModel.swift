@@ -22,18 +22,42 @@ final class AppModel {
     var presentedSheet: PresentedSheet?
     var activeDevice: PairedDevice?
     var requireOwnerAuthentication: Bool {
-        didSet {
-            UserDefaults.standard.set(requireOwnerAuthentication, forKey: "requireOwnerAuthentication")
-        }
+        didSet { persist("requireOwnerAuthentication", requireOwnerAuthentication) }
+    }
+    var blockScreenCapture: Bool {
+        didSet { persist("blockScreenCapture", blockScreenCapture) }
+    }
+    var hideScreenWhenInactive: Bool {
+        didSet { persist("hideScreenWhenInactive", hideScreenWhenInactive) }
+    }
+    var privacyShieldWhenAway: Bool {
+        didSet { persist("privacyShieldWhenAway", privacyShieldWhenAway) }
+    }
+    var privacyShieldAlways: Bool {
+        didSet { persist("privacyShieldAlways", privacyShieldAlways) }
+    }
+
+    var usesStrongestProtection: Bool {
+        requireOwnerAuthentication
+            && blockScreenCapture
+            && hideScreenWhenInactive
+            && privacyShieldWhenAway
     }
 
     init(devices: [PairedDevice]? = nil) {
         self.devices = devices ?? SecureDeviceStore.load()
-        if UserDefaults.standard.object(forKey: "requireOwnerAuthentication") == nil {
-            self.requireOwnerAuthentication = true
-        } else {
-            self.requireOwnerAuthentication = UserDefaults.standard.bool(forKey: "requireOwnerAuthentication")
-        }
+        self.requireOwnerAuthentication = Self.storedFlag("requireOwnerAuthentication", default: true)
+        self.blockScreenCapture = Self.storedFlag("blockScreenCapture", default: true)
+        self.hideScreenWhenInactive = Self.storedFlag("hideScreenWhenInactive", default: true)
+        self.privacyShieldWhenAway = Self.storedFlag("privacyShieldWhenAway", default: true)
+        self.privacyShieldAlways = Self.storedFlag("privacyShieldAlways", default: false)
+    }
+
+    func enableStrongestProtection() {
+        requireOwnerAuthentication = true
+        blockScreenCapture = true
+        hideScreenWhenInactive = true
+        privacyShieldWhenAway = true
     }
 
     func registerDevice(
@@ -93,6 +117,22 @@ final class AppModel {
         activeDevice = nil
     }
 
+    func mergeEndpoints(_ endpoints: [String], into id: UUID) {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+        var ordered = devices[index].endpoints
+        for endpoint in endpoints {
+            let trimmed = endpoint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !trimmed.isEmpty, !ordered.contains(trimmed) {
+                ordered.append(trimmed)
+            }
+        }
+        guard ordered != devices[index].endpoints else { return }
+        devices[index].endpoints = ordered
+        persistDevices()
+    }
+
     func forget(_ device: PairedDevice) {
         devices.removeAll { $0.id == device.id }
         persistDevices()
@@ -100,6 +140,16 @@ final class AppModel {
 
     private func persistDevices() {
         SecureDeviceStore.save(devices)
+    }
+
+    private func persist(_ key: String, _ value: Bool) {
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private static func storedFlag(_ key: String, default defaultValue: Bool) -> Bool {
+        UserDefaults.standard.object(forKey: key) == nil
+            ? defaultValue
+            : UserDefaults.standard.bool(forKey: key)
     }
 }
 

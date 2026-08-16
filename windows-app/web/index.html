@@ -8,27 +8,100 @@
     <script src="app.js" defer></script>
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <h1 id="host-name">PC</h1>
-          <p id="endpoint">…</p>
+    <div class="app">
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="brand" data-tauri-drag-region>
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 20 20">
+              <rect x="2.5" y="4" width="10" height="8" rx="1.6" />
+              <rect x="7.5" y="8" width="10" height="8" rx="1.6" />
+            </svg>
+          </span>
+          RemoteCanvas
+          <span class="app-version" id="app-version">…</span>
         </div>
-        <span class="status" id="service-state">Live</span>
+        <div class="window-controls">
+          <button type="button" id="win-min" aria-label="Minimize">
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" /></svg>
+          </button>
+          <button type="button" id="win-close" aria-label="Close">
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+          </button>
+        </div>
       </header>
 
-      <button class="primary" id="pair-button">Add device</button>
-      <button class="ghost" id="update-button">Update</button>
-      <button class="ghost" id="rotate-button">Rotate keys</button>
+      <main>
+        <section id="home-view">
+          <article class="host-card">
+            <div class="host-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="13" rx="2.4" />
+                <path d="M8 20h8M12 17v3" />
+              </svg>
+            </div>
+            <div class="host-copy">
+              <div class="host-row">
+                <h1 id="host-name">PC</h1>
+                <span class="status" id="service-state" data-state="live">Live</span>
+              </div>
+              <p id="endpoint" title="Click to copy">…</p>
+              <p class="meta-line" id="host-meta">Ready</p>
+            </div>
+          </article>
 
-      <section class="pairing hidden" id="pairing-card" aria-live="polite">
-        <div class="qr" id="pairing-qr" aria-label="Pairing QR code"></div>
-        <p class="code" id="pairing-code">------</p>
-        <p class="meta"><span id="pairing-expiry">5 min</span> · <code id="pairing-endpoint">—</code></p>
-        <button class="ghost" id="close-pairing">Done</button>
-      </section>
+          <div class="tiles">
+            <button class="tile" id="pair-button">
+              <span class="tile-icon pair">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 7h10v10H7z" />
+                  <path d="M9 3h2M13 3h2M9 21h2M13 21h2M3 9v2M3 13v2M21 9v2M21 13v2" />
+                </svg>
+              </span>
+              <span class="tile-label">Add device</span>
+            </button>
+            <button class="tile" id="copy-button">
+              <span class="tile-icon copy">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="8" y="8" width="11" height="11" rx="2" />
+                  <path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              </span>
+              <span class="tile-label" id="copy-label">Copy address</span>
+            </button>
+            <button class="tile" id="update-button">
+              <span class="tile-icon update">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 4v10" />
+                  <path d="M8 10l4 4 4-4" />
+                  <path d="M5 18h14" />
+                </svg>
+              </span>
+              <span class="tile-label" id="update-label">Update</span>
+              <span class="tile-sub" id="update-sub">Checking…</span>
+            </button>
+            <button class="tile" id="rotate-button">
+              <span class="tile-icon rotate">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="8" cy="15" r="3" />
+                  <path d="M11 15h8l-2.5-2.5M19 15l-2.5 2.5" />
+                </svg>
+              </span>
+              <span class="tile-label">Rotate keys</span>
+            </button>
+          </div>
+        </section>
 
-      <p class="error hidden" id="error-message"></p>
-    </main>
+        <section class="pairing hidden" id="pairing-card" aria-live="polite">
+          <div class="qr-wrap">
+            <div class="qr" id="pairing-qr" aria-label="Pairing QR code"></div>
+          </div>
+          <p class="code" id="pairing-code" title="Click to copy">------</p>
+          <p class="meta"><span id="pairing-expiry">5:00</span> · <code id="pairing-endpoint">—</code></p>
+          <button class="primary" id="close-pairing">Done</button>
+        </section>
+
+        <p class="error hidden" id="error-message"></p>
+      </main>
+    </div>
   </body>
 </html>

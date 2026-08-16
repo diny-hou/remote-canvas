@@ -3,11 +3,12 @@ use std::{fs, io::Write, path::PathBuf};
 
 const REPO: &str = "diny-hou/remote-canvas";
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub status: &'static str,
-    pub version: String,
+    pub current_version: String,
+    pub latest_version: String,
 }
 
 #[derive(Deserialize)]
@@ -22,30 +23,16 @@ struct GithubAsset {
     name: String,
 }
 
-pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("RemoteCanvas-Host")
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let release = client
-        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| map_github_error(error, "release list"))?
-        .json::<GithubRelease>()
-        .await
-        .map_err(|error| error.to_string())?;
+pub async fn check_latest(current_version: &str) -> Result<UpdateStatus, String> {
+    let release = fetch_latest().await?;
+    Ok(status_from(current_version, &release.tag_name, false))
+}
 
-    let latest = release.tag_name.trim().trim_start_matches('v').to_string();
+pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, String> {
+    let release = fetch_latest().await?;
+    let latest = normalize_version(&release.tag_name);
     if version_tuple(&latest) <= version_tuple(current_version) {
-        return Ok(UpdateStatus {
-            status: "upToDate",
-            version: latest,
-        });
+        return Ok(status_from(current_version, &latest, false));
     }
 
     let asset = release
@@ -60,6 +47,7 @@ pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, Strin
         })
         .ok_or_else(|| "Latest release has no Windows installer".to_string())?;
 
+    let client = github_client()?;
     let bytes = client
         .get(format!(
             "https://api.github.com/repos/{REPO}/releases/assets/{}",
@@ -81,10 +69,49 @@ pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, Strin
     drop(file);
 
     launch_installer_and_relaunch(&installer)?;
-    Ok(UpdateStatus {
-        status: "installing",
-        version: latest,
-    })
+    Ok(status_from(current_version, &latest, true))
+}
+
+async fn fetch_latest() -> Result<GithubRelease, String> {
+    github_client()?
+        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| map_github_error(error, "release list"))?
+        .json::<GithubRelease>()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn github_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("RemoteCanvas-Host")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn status_from(current: &str, latest: &str, installing: bool) -> UpdateStatus {
+    let latest = normalize_version(latest);
+    let status = if installing {
+        "installing"
+    } else if version_tuple(&latest) > version_tuple(current) {
+        "available"
+    } else {
+        "upToDate"
+    };
+    UpdateStatus {
+        status,
+        current_version: current.to_string(),
+        latest_version: latest,
+    }
+}
+
+fn normalize_version(version: &str) -> String {
+    version.trim().trim_start_matches('v').to_string()
 }
 
 fn map_github_error(error: reqwest::Error, what: &str) -> String {

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 import Observation
 import Security
 import UIKit
@@ -9,7 +10,9 @@ struct PointerEvent: Sendable, Equatable {
         case move
         case primaryClick
         case secondaryClick
+        case doubleClick
         case scroll(CGFloat)
+        case scrollHorizontal(CGFloat)
     }
 
     let normalizedLocation: CGPoint
@@ -20,7 +23,9 @@ struct PointerEvent: Sendable, Equatable {
 protocol RemoteSessionTransport: AnyObject {
     var latestFrame: Data? { get }
     var statusText: String { get }
+    var lastError: String? { get }
     var isUsingLAN: Bool { get }
+    var discoveredEndpoints: [String] { get }
     func connect() async
     func send(pointerEvent: PointerEvent) async throws
     func send(text: String) async throws
@@ -34,7 +39,9 @@ protocol RemoteSessionTransport: AnyObject {
 final class PreviewRemoteSessionTransport: RemoteSessionTransport {
     var latestFrame: Data?
     var statusText: String { "Preview" }
+    var lastError: String? { nil }
     var isUsingLAN: Bool { true }
+    var discoveredEndpoints: [String] { [] }
     func connect() async {}
     func send(pointerEvent: PointerEvent) async throws {}
     func send(text: String) async throws {}
@@ -83,11 +90,15 @@ final class LiveRemoteSession: RemoteSessionTransport {
     private var receiveTask: Task<Void, Never>?
     private var shouldReconnect = false
     private var activeEndpoint: String?
+    private var pendingMove: PointerEvent?
+    private var moveFlushTask: Task<Void, Never>?
 
     var latestFrame: Data?
     var statusText = "Waiting"
+    var lastError: String?
     var isConnected = false
     var isUsingLAN = false
+    var discoveredEndpoints: [String] = []
 
     init(device: PairedDevice) {
         self.device = device
@@ -164,6 +175,28 @@ final class LiveRemoteSession: RemoteSessionTransport {
     }
 
     func send(pointerEvent: PointerEvent) async throws {
+        if pointerEvent.action == .move {
+            pendingMove = pointerEvent
+            if moveFlushTask == nil {
+                moveFlushTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 12_000_000)
+                    await self?.flushPendingMove()
+                }
+            }
+            return
+        }
+        await flushPendingMove()
+        try await sendPointerNow(pointerEvent)
+    }
+
+    private func flushPendingMove() async {
+        moveFlushTask = nil
+        guard let pendingMove else { return }
+        self.pendingMove = nil
+        try? await sendPointerNow(pendingMove)
+    }
+
+    private func sendPointerNow(_ pointerEvent: PointerEvent) async throws {
         let action: String
         let delta: Double
         switch pointerEvent.action {
@@ -176,8 +209,14 @@ final class LiveRemoteSession: RemoteSessionTransport {
         case .secondaryClick:
             action = "secondary_click"
             delta = 0
+        case .doubleClick:
+            action = "double_click"
+            delta = 0
         case .scroll(let amount):
             action = "scroll"
+            delta = Double(amount)
+        case .scrollHorizontal(let amount):
+            action = "scroll_horizontal"
             delta = Double(amount)
         }
         try await sendJSON([
@@ -240,51 +279,152 @@ final class LiveRemoteSession: RemoteSessionTransport {
     }
 
     private func connectWithRetry(resetBackoff: Bool) async {
-        var delay: UInt64 = resetBackoff ? 400_000_000 : 1_000_000_000
+        var delay: UInt64 = resetBackoff ? 250_000_000 : 800_000_000
         while shouldReconnect && !Task.isCancelled {
             if await openSocket() {
                 receiveTask?.cancel()
                 receiveTask = Task { [weak self] in
                     await self?.receiveFrames()
                 }
+                lastError = nil
                 return
             }
             statusText = "Reconnecting"
+            lastError = awayFromHomeHint()
             try? await Task.sleep(nanoseconds: delay)
             delay = min(delay * 2, 4_000_000_000)
         }
     }
 
     private func openSocket() async -> Bool {
-        for endpoint in device.preferredEndpoints {
-            guard await probe(endpoint), let url = websocketURL(from: endpoint) else { continue }
-            var request = URLRequest(url: url, timeoutInterval: 10)
-            applyAuth(&request, path: isLikelyLAN(endpoint) ? "lan" : "tailscale")
-            let task = session.webSocketTask(with: request)
-            socket = task
-            task.resume()
-            activeEndpoint = endpoint
-            isConnected = true
-            isUsingLAN = isLikelyLAN(endpoint)
-            statusText = isUsingLAN ? "LAN" : "Remote"
-            return true
+        guard let endpoint = await firstReachableEndpoint() else {
+            socket = nil
+            isConnected = false
+            return false
         }
-        socket = nil
-        isConnected = false
-        return false
+        guard let url = websocketURL(from: endpoint) else { return false }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        applyAuth(&request, path: isLikelyLAN(endpoint) ? "lan" : "tailscale")
+        let task = session.webSocketTask(with: request)
+        task.resume()
+        do {
+            let message = try await receiveOnce(task, timeout: 8)
+            if case .data(let data) = message {
+                latestFrame = data
+            }
+        } catch {
+            task.cancel(with: .goingAway, reason: nil)
+            return false
+        }
+        socket = task
+        activeEndpoint = endpoint
+        isConnected = true
+        isUsingLAN = isLikelyLAN(endpoint)
+        statusText = isUsingLAN ? "LAN" : "Remote"
+        return true
+    }
+
+    private func firstReachableEndpoint() async -> String? {
+        let endpoints = candidateEndpoints()
+        guard !endpoints.isEmpty else { return nil }
+        return await withTaskGroup(of: (String, Int)?.self) { group in
+            for endpoint in endpoints {
+                group.addTask {
+                    if await self.probe(endpoint) {
+                        return (endpoint, await self.preferenceRank(endpoint))
+                    }
+                    return nil
+                }
+            }
+            var best: (String, Int)?
+            for await result in group {
+                guard let result else { continue }
+                if best == nil || result.1 < best!.1 {
+                    best = result
+                }
+            }
+            return best?.0
+        }
+    }
+
+    private func candidateEndpoints() -> [String] {
+        var ordered: [String] = []
+        for candidate in discoveredEndpoints + device.preferredEndpoints {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !isLoopback(trimmed), !ordered.contains(trimmed) {
+                ordered.append(trimmed)
+            }
+        }
+        if PathState.shared.isCellularOnly {
+            return ordered.sorted { preferenceRank($0) < preferenceRank($1) }
+        }
+        return ordered
+    }
+
+    private func preferenceRank(_ endpoint: String) -> Int {
+        if PathState.shared.isCellularOnly {
+            return isLikelyLAN(endpoint) ? 2 : 0
+        }
+        return isLikelyLAN(endpoint) ? 0 : 1
     }
 
     private func probe(_ endpoint: String) async -> Bool {
         guard var components = URLComponents(string: endpoint) else { return false }
         components.path = "/health"
         guard let url = components.url else { return false }
-        var request = URLRequest(url: url, timeoutInterval: isLikelyLAN(endpoint) ? 3 : 8)
+        let timeout: TimeInterval
+        if PathState.shared.isCellularOnly && isLikelyLAN(endpoint) {
+            timeout = 0.7
+        } else {
+            timeout = isLikelyLAN(endpoint) ? 1.4 : 10
+        }
+        let request = URLRequest(url: url, timeoutInterval: timeout)
         do {
-            let (_, response) = try await session.data(for: request)
-            return ((response as? HTTPURLResponse)?.statusCode ?? 500) < 300
+            let (data, response) = try await session.data(for: request)
+            guard ((response as? HTTPURLResponse)?.statusCode ?? 500) < 300 else { return false }
+            if let health = try? JSONDecoder().decode(HealthInfo.self, from: data) {
+                mergeDiscovered(health.endpoints ?? [])
+            }
+            return true
         } catch {
             return false
         }
+    }
+
+    private func mergeDiscovered(_ endpoints: [String]) {
+        var merged = discoveredEndpoints
+        for endpoint in endpoints {
+            let trimmed = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !isLoopback(trimmed), !merged.contains(trimmed) {
+                merged.append(trimmed)
+            }
+        }
+        if merged != discoveredEndpoints {
+            discoveredEndpoints = merged
+        }
+    }
+
+    private func receiveOnce(
+        _ task: URLSessionWebSocketTask,
+        timeout: TimeInterval
+    ) async throws -> URLSessionWebSocketTask.Message {
+        try await withThrowingTaskGroup(of: URLSessionWebSocketTask.Message.self) { group in
+            group.addTask { try await task.receive() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw SessionError.disconnected
+            }
+            let message = try await group.next()!
+            group.cancelAll()
+            return message
+        }
+    }
+
+    private func awayFromHomeHint() -> String {
+        if PathState.shared.isCellularOnly {
+            return "Away from home. The PC must be on Tailscale."
+        }
+        return "Could not reach the PC."
     }
 
     private func receiveFrames() async {
@@ -431,6 +571,29 @@ final class PinDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
             return
         }
         completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
+private struct HealthInfo: Decodable {
+    let endpoints: [String]?
+}
+
+@MainActor
+private final class PathState {
+    static let shared = PathState()
+    private let monitor = NWPathMonitor()
+    private(set) var isCellularOnly = false
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            let cellular = path.usesInterfaceType(.cellular)
+                && !path.usesInterfaceType(.wifi)
+                && !path.usesInterfaceType(.wiredEthernet)
+            Task { @MainActor in
+                self?.isCellularOnly = cellular
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "jp.remote-canvas.path"))
     }
 }
 

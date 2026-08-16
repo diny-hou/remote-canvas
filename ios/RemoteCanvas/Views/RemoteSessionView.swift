@@ -1,3 +1,4 @@
+import LocalAuthentication
 import SwiftUI
 import QuickLook
 import UniformTypeIdentifiers
@@ -8,84 +9,61 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
     let device: PairedDevice
     let transport: Transport
 
-    @State private var pointer = CGPoint(x: 0.5, y: 0.5)
     @State private var keyboardText = ""
     @State private var isKeyboardVisible = false
     @State private var isFileBrowserVisible = false
+    @State private var privacyOverride: Bool?
+    @State private var privacyHole: CGPoint?
+    @State private var isContentConcealed = false
+    @State private var isAuthenticating = false
+    @State private var isScreenCaptured = UIScreen.main.isCaptured
     @FocusState private var keyboardFocused: Bool
 
     var body: some View {
         ZStack(alignment: .bottom) {
             Color.black.ignoresSafeArea()
 
-            RemoteWorkspaceView(frameData: transport.latestFrame, pointer: pointer) { event in
-                pointer = event.normalizedLocation
+            RemoteWorkspaceView(
+                frameData: shouldHidePixels ? nil : transport.latestFrame,
+                protectFromCapture: appModel.blockScreenCapture,
+                onLocalTouch: { privacyHole = $0 }
+            ) { event in
                 Task { try? await transport.send(pointerEvent: event) }
             }
             .ignoresSafeArea()
 
-            VStack(spacing: 10) {
-                if isKeyboardVisible {
-                    TextField("Type", text: $keyboardText)
-                        .focused($keyboardFocused)
-                        .textFieldStyle(.roundedBorder)
-                        .padding(.horizontal, 12)
-                }
+            if isPrivacyShieldOn && !shouldHidePixels {
+                PrivacyShieldOverlay(hole: privacyHole)
+                    .ignoresSafeArea()
+            }
 
-                HStack(spacing: 18) {
-                    Button {
+            if shouldHidePixels {
+                ConcealmentCover(
+                    isRecording: isScreenCaptured && appModel.blockScreenCapture,
+                    onReveal: { Task { await revealIfAllowed() } },
+                    onDisconnect: {
                         Task { await transport.disconnect() }
                         appModel.disconnect()
                         dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
                     }
-                    .accessibilityLabel("Disconnect")
+                )
+            }
 
-                    Spacer()
+            if transport.latestFrame == nil && !shouldHidePixels {
+                connectionStatus
+            }
 
-                    Button {
-                        isKeyboardVisible.toggle()
-                    } label: {
-                        Image(systemName: "keyboard")
-                    }
-                    .accessibilityLabel("Keyboard")
-
-                    Button {
-                        isFileBrowserVisible = true
-                    } label: {
-                        Image(systemName: "folder")
-                    }
-                    .accessibilityLabel("Files")
-
-                    Button {
-                        let event = PointerEvent(normalizedLocation: pointer, action: .secondaryClick)
-                        Task { try? await transport.send(pointerEvent: event) }
-                    } label: {
-                        Image(systemName: "cursorarrow.click.2")
-                    }
-                    .accessibilityLabel("Right click")
-
-                    Menu {
-                        Button("Up", systemImage: "arrow.up") { sendScroll(4) }
-                        Button("Down", systemImage: "arrow.down") { sendScroll(-4) }
-                    } label: {
-                        Image(systemName: "scroll")
-                    }
-                    .accessibilityLabel("Scroll")
-                }
-                .font(.body.weight(.medium))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.black.opacity(0.55), in: Capsule())
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+            if !shouldHidePixels {
+                sessionChrome
             }
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .task { await transport.connect() }
+        .onChange(of: transport.discoveredEndpoints) { _, endpoints in
+            appModel.mergeEndpoints(endpoints, into: device.id)
+        }
         .onDisappear { Task { await transport.disconnect() } }
         .onChange(of: keyboardText) { oldValue, newValue in
             guard newValue != oldValue, !newValue.isEmpty else { return }
@@ -97,14 +75,181 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
         .onChange(of: isKeyboardVisible) { _, isVisible in
             keyboardFocused = isVisible
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            if appModel.hideScreenWhenInactive && !isAuthenticating {
+                isContentConcealed = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            if isContentConcealed {
+                Task { await revealIfAllowed() }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
+            isScreenCaptured = UIScreen.main.isCaptured
+        }
         .sheet(isPresented: $isFileBrowserVisible) {
-            RemoteFileBrowserView(transport: transport)
+            RemoteFileBrowserView(
+                transport: transport,
+                hideWhenInactive: appModel.hideScreenWhenInactive,
+                blockScreenCapture: appModel.blockScreenCapture
+            )
         }
     }
 
-    private func sendScroll(_ amount: CGFloat) {
-        let event = PointerEvent(normalizedLocation: pointer, action: .scroll(amount))
-        Task { try? await transport.send(pointerEvent: event) }
+    private var connectionStatus: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+            Text(transport.statusText)
+                .font(.headline)
+            if let lastError = transport.lastError {
+                Text(lastError)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+    }
+
+    private var sessionChrome: some View {
+        VStack(spacing: 10) {
+            if isKeyboardVisible {
+                TextField("Type", text: $keyboardText)
+                    .focused($keyboardFocused)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal, 12)
+            }
+
+            HStack(spacing: 18) {
+                Button {
+                    Task { await transport.disconnect() }
+                    appModel.disconnect()
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .accessibilityLabel("Disconnect")
+
+                Spacer()
+
+                Button {
+                    isKeyboardVisible.toggle()
+                } label: {
+                    Image(systemName: "keyboard")
+                }
+                .accessibilityLabel("Keyboard")
+
+                Button {
+                    isFileBrowserVisible = true
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .accessibilityLabel("Files")
+
+                Button {
+                    privacyOverride = !isPrivacyShieldOn
+                } label: {
+                    Image(systemName: isPrivacyShieldOn ? "eye.slash" : "eye")
+                }
+                .accessibilityLabel(isPrivacyShieldOn ? "Disable privacy shield" : "Enable privacy shield")
+            }
+            .font(.body.weight(.medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.black.opacity(0.55), in: Capsule())
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private var isPrivacyShieldOn: Bool {
+        if let privacyOverride { return privacyOverride }
+        return appModel.privacyShieldAlways || (appModel.privacyShieldWhenAway && !transport.isUsingLAN)
+    }
+
+    private var shouldHidePixels: Bool {
+        isContentConcealed || (appModel.blockScreenCapture && isScreenCaptured)
+    }
+
+    private func revealIfAllowed() async {
+        if appModel.blockScreenCapture && UIScreen.main.isCaptured {
+            return
+        }
+        guard appModel.requireOwnerAuthentication else {
+            isContentConcealed = false
+            return
+        }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        let context = LAContext()
+        context.localizedCancelTitle = "Disconnect"
+        do {
+            try await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Reveal this PC"
+            )
+            isContentConcealed = false
+        } catch {
+            await transport.disconnect()
+            appModel.disconnect()
+            dismiss()
+        }
+    }
+}
+
+private struct PrivacyShieldOverlay: View {
+    let hole: CGPoint?
+
+    var body: some View {
+        GeometryReader { geometry in
+            let center = hole ?? CGPoint(x: geometry.size.width / 2, y: geometry.size.height * 0.42)
+            let radius: CGFloat = hole == nil ? 96 : 118
+            Canvas { context, size in
+                var path = Path(CGRect(origin: .zero, size: size))
+                path.addEllipse(in: CGRect(
+                    x: center.x - radius,
+                    y: center.y - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                ))
+                context.fill(path, with: .color(.black.opacity(0.96)), style: FillStyle(eoFill: true))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ConcealmentCover: View {
+    let isRecording: Bool
+    let onReveal: () -> Void
+    let onDisconnect: () -> Void
+
+    var body: some View {
+        Color.black
+            .ignoresSafeArea()
+            .overlay {
+                VStack(spacing: 16) {
+                    Image(systemName: isRecording ? "record.circle" : "eye.slash")
+                        .font(.largeTitle)
+                    Text(isRecording ? "Recording blocked" : "Hidden")
+                        .font(.headline)
+                    Text(isRecording ? "Stop screen recording to continue." : "Tap to reveal")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Disconnect", action: onDisconnect)
+                        .buttonStyle(.bordered)
+                        .padding(.top, 8)
+                }
+                .foregroundStyle(.white)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if !isRecording { onReveal() }
+            }
     }
 }
 
@@ -116,6 +261,8 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
 private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     @Environment(\.dismiss) private var dismiss
     let transport: Transport
+    var hideWhenInactive = false
+    var blockScreenCapture = false
 
     @State private var entries: [RemoteFileEntry] = []
     @State private var currentPath = ""
@@ -124,6 +271,8 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     @State private var errorMessage: String?
     @State private var previewURL: URL?
     @State private var isImporterPresented = false
+    @State private var isContentConcealed = false
+    @State private var isScreenCaptured = UIScreen.main.isCaptured
 
     var body: some View {
         NavigationStack {
@@ -138,7 +287,7 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
                             open(entry)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: entry.isDirectory ? "folder.fill" : icon(for: entry.name))
+                                Image(systemName: entry.isDirectory ? folderIcon(for: entry) : icon(for: entry.name))
                                     .foregroundStyle(entry.isDirectory ? .secondary : .primary)
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 2) {
@@ -212,6 +361,20 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
                         .ignoresSafeArea()
                 }
             }
+            .overlay {
+                if isContentConcealed || (blockScreenCapture && isScreenCaptured) {
+                    Color.black.ignoresSafeArea()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                if hideWhenInactive { isContentConcealed = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                isContentConcealed = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
+                isScreenCaptured = UIScreen.main.isCaptured
+            }
         }
     }
 
@@ -241,6 +404,12 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+    }
+
+    private func folderIcon(for entry: RemoteFileEntry) -> String {
+        if entry.name == "Home" { return "house.fill" }
+        if entry.name.contains(":") { return "internaldrive.fill" }
+        return "folder.fill"
     }
 
     private func icon(for name: String) -> String {
