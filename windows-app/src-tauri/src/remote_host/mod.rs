@@ -234,7 +234,8 @@ impl RemoteHostState {
 
     async fn reload_tls(&self) -> Result<(), String> {
         let (cert, key) = self.tls_pem();
-        if let Some(tls) = lock(&self.tls).clone() {
+        let tls = { lock(&self.tls).clone() };
+        if let Some(tls) = tls {
             tls.reload_from_pem(cert, key)
                 .await
                 .map_err(|error| error.to_string())?;
