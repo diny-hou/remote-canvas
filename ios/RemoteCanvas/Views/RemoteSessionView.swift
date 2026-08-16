@@ -332,9 +332,6 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     @State private var errorMessage: String?
     @State private var preview: FilePreviewItem?
     @State private var previewCleanup: URL?
-    @StateObject private var mediaPlayback = VLCPlaybackController()
-    @State private var pipRestoreItem: FilePreviewItem?
-    @State private var isRestoringFromPiP = false
     @State private var downloadLabel: String?
     @State private var isImporterPresented = false
     @State private var isContentConcealed = false
@@ -367,14 +364,7 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
                     }
                 }
                 .overlay { loadingOverlay }
-                .fullScreenCover(item: $preview, onDismiss: handlePreviewDismiss, content: previewCover)
-                .onAppear { attachMediaPlaybackHandlers() }
-                .onChange(of: mediaPlayback.isPictureInPictureActive, handlePictureInPictureChange)
-                .onChange(of: preview != nil) { _, hasPreview in
-                    if hasPreview {
-                        isRestoringFromPiP = false
-                    }
-                }
+                .fullScreenCover(item: $preview, onDismiss: cleanupPreview, content: previewCover)
                 .overlay {
                     if isContentConcealed || (blockScreenCapture && isScreenCaptured) {
                         Color.black.ignoresSafeArea()
@@ -474,10 +464,6 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
         FilePreviewContainer(
             item: item,
             loadRemoteFile: downloadIntoPreviewFolder,
-            sharedPlayback: mediaPlayback,
-            onPlaylistChange: { playlist, index in
-                pipRestoreItem = .media(playlist: playlist, startIndex: index)
-            },
             onClose: { preview = nil }
         )
     }
@@ -487,13 +473,6 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
             return try await transport.download(entry, into: previewCleanup)
         }
         return try await transport.download(entry)
-    }
-
-    private func handlePictureInPictureChange(_ oldValue: Bool, _ active: Bool) {
-        if active, case .media = preview {
-            pipRestoreItem = preview
-            preview = nil
-        }
     }
 
     private func open(_ entry: RemoteFileEntry) {
@@ -570,31 +549,6 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
         default:
             .document(url)
         }
-    }
-
-    private func attachMediaPlaybackHandlers() {
-        mediaPlayback.onRestoreUserInterface = { completion in
-            isRestoringFromPiP = true
-            preview = pipRestoreItem ?? preview
-            completion(true)
-        }
-        mediaPlayback.onPictureInPictureStopped = {
-            if isRestoringFromPiP { return }
-            if preview == nil {
-                mediaPlayback.stop()
-                cleanupPreview()
-                pipRestoreItem = nil
-            }
-        }
-    }
-
-    private func handlePreviewDismiss() {
-        if mediaPlayback.isPictureInPictureActive || isRestoringFromPiP {
-            return
-        }
-        mediaPlayback.stop()
-        cleanupPreview()
-        pipRestoreItem = nil
     }
 
     private func cleanupPreview() {
