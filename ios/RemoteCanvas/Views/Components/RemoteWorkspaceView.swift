@@ -202,9 +202,6 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         if gestureRecognizer === oneFingerDrag {
             return !suppressDragUntilLift && !twoFingerActive
         }
-        if gestureRecognizer === pinch {
-            return twoFingerIntent != .scroll
-        }
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
 
@@ -388,20 +385,21 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
     }
 
     private func resolveTwoFingerIntent(desiredZoom: CGFloat, mid: CGPoint, fingers: [CGPoint]) {
-        if twoFingerIntent == .scroll { return }
-        let analysis = fingerMotion(fingers)
-        if analysis.oneHeld || analysis.sameDirection {
-            lockScroll()
-            return
-        }
         guard twoFingerIntent == .undecided else { return }
         let factor = desiredZoom / max(pinchStart, 0.001)
         let zoomAmount = abs(factor - 1)
-        let midMove = hypot(mid.x - twoFingerStartMid.x, mid.y - twoFingerStartMid.y)
-        if analysis.bothMoving, zoomAmount >= 0.10, !analysis.sameDirection {
+        let analysis = fingerMotion(fingers)
+
+        if zoomAmount >= 0.05, analysis.radialPinch || (analysis.bothMoving && !analysis.sameDirection) {
             twoFingerIntent = .zoom
-        } else if zoomAmount >= 0.16, midMove < 10, !analysis.oneHeld {
-            twoFingerIntent = .zoom
+            return
+        }
+        if analysis.sameDirection, zoomAmount < 0.08 {
+            lockScroll()
+            return
+        }
+        if analysis.oneHeld, analysis.tangentialScroll, zoomAmount < 0.12 {
+            lockScroll()
         }
     }
 
@@ -450,22 +448,39 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         return swapped < direct ? [current[1], current[0]] : current
     }
 
-    private func fingerMotion(_ fingers: [CGPoint]) -> (oneHeld: Bool, bothMoving: Bool, sameDirection: Bool) {
+    private func fingerMotion(_ fingers: [CGPoint]) -> (
+        oneHeld: Bool,
+        bothMoving: Bool,
+        sameDirection: Bool,
+        radialPinch: Bool,
+        tangentialScroll: Bool
+    ) {
         guard fingers.count == 2, fingerStarts.count == 2 else {
-            return (false, false, false)
+            return (false, false, false, false, false)
         }
         let move0 = CGPoint(x: fingers[0].x - fingerStarts[0].x, y: fingers[0].y - fingerStarts[0].y)
         let move1 = CGPoint(x: fingers[1].x - fingerStarts[1].x, y: fingers[1].y - fingerStarts[1].y)
         let dist0 = hypot(move0.x, move0.y)
         let dist1 = hypot(move1.x, move1.y)
-        let oneHeld = (dist0 < 16 && dist1 >= 14)
-            || (dist1 < 16 && dist0 >= 14)
-            || (dist1 >= 20 && dist0 < max(16, dist1 * 0.35))
-            || (dist0 >= 20 && dist1 < max(16, dist0 * 0.35))
-        let bothMoving = dist0 >= 12 && dist1 >= 12 && !oneHeld
+        let oneHeld = (dist0 < 10 && dist1 >= 16) || (dist1 < 10 && dist0 >= 16)
+        let bothMoving = dist0 >= 10 && dist1 >= 10
         let lengths = dist0 * dist1
-        let sameDirection = bothMoving && lengths > 0 && ((move0.x * move1.x + move0.y * move1.y) / lengths) > 0.35
-        return (oneHeld, bothMoving, sameDirection)
+        let sameDirection = bothMoving && lengths > 0 && ((move0.x * move1.x + move0.y * move1.y) / lengths) > 0.45
+
+        let axis = CGPoint(x: fingerStarts[1].x - fingerStarts[0].x, y: fingerStarts[1].y - fingerStarts[0].y)
+        let axisLength = hypot(axis.x, axis.y)
+        let primary = dist0 >= dist1 ? move0 : move1
+        var radial: CGFloat = 0
+        var tangential: CGFloat = 0
+        if axisLength > 1 {
+            let nx = axis.x / axisLength
+            let ny = axis.y / axisLength
+            radial = abs(primary.x * nx + primary.y * ny)
+            tangential = abs(primary.x * -ny + primary.y * nx)
+        }
+        let radialPinch = radial >= 10 && radial >= tangential
+        let tangentialScroll = oneHeld && tangential >= 12 && tangential > radial * 1.15
+        return (oneHeld, bothMoving, sameDirection, radialPinch, tangentialScroll)
     }
 
     private func cancelOneFingerDragForScroll() {
