@@ -430,7 +430,15 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
                 }
             }
             .fullScreenCover(item: $preview, onDismiss: cleanupPreview) { item in
-                FilePreviewContainer(item: item) {
+                FilePreviewContainer(
+                    item: item,
+                    loadRemoteFile: { entry in
+                        if let previewCleanup {
+                            return try await transport.download(entry, into: previewCleanup)
+                        }
+                        return try await transport.download(entry)
+                    }
+                ) {
                     preview = nil
                 }
             }
@@ -496,16 +504,34 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
         case .image:
             return .comic(title: entry.name, pages: [url], startIndex: 0)
         case .video, .audio:
-            return .media(url)
+            return mediaPlaylist(for: entry, localURL: url)
         default:
             return mediaOrDocument(url)
         }
     }
 
+    private func mediaPlaylist(for entry: RemoteFileEntry, localURL: URL) -> FilePreviewItem {
+        let siblings = entries.filter { !$0.isDirectory && FileKind(fileName: $0.name).isPlayable }
+        let list = siblings.isEmpty ? [entry] : siblings
+        let index = list.firstIndex(where: { $0.path == entry.path }) ?? 0
+        return .media(
+            playlist: list.map { item in
+                MediaPlaylistItem(
+                    name: item.name,
+                    remotePath: item.path,
+                    localURL: item.path == entry.path ? localURL : nil
+                )
+            },
+            startIndex: index
+        )
+    }
+
     private func mediaOrDocument(_ url: URL) -> FilePreviewItem {
         switch FileKind(url: url) {
-        case .video, .audio: .media(url)
-        default: .document(url)
+        case .video, .audio:
+            makeMediaPlaylist(startingAt: url, in: [url])
+        default:
+            .document(url)
         }
     }
 

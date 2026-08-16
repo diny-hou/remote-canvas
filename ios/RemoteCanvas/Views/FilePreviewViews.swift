@@ -5,18 +5,24 @@ import SwiftUI
 
 struct FilePreviewContainer: View {
     let item: FilePreviewItem
+    var loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?
     var onClose: () -> Void
 
     var body: some View {
         switch item {
         case .comic(let title, let pages, let start):
             ComicReaderView(title: title, pages: pages, startIndex: start, onClose: onClose)
-        case .media(let url):
-            RemoteMediaPlayerView(url: url, onClose: onClose)
+        case .media(let playlist, let start):
+            RemoteMediaPlayerView(
+                playlist: playlist,
+                startIndex: start,
+                loadRemoteFile: loadRemoteFile,
+                onClose: onClose
+            )
         case .document(let url):
             DocumentPreviewView(url: url, onClose: onClose)
         case .archive(let title, let files):
-            ArchiveBrowserView(title: title, files: files, onClose: onClose)
+            ArchiveBrowserView(title: title, files: files, loadRemoteFile: loadRemoteFile, onClose: onClose)
         }
     }
 }
@@ -160,6 +166,7 @@ private struct ZoomablePage: View {
 struct ArchiveBrowserView: View {
     let title: String
     let files: [URL]
+    var loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?
     var onClose: () -> Void
 
     @State private var nested: FilePreviewItem?
@@ -181,7 +188,7 @@ struct ArchiveBrowserView: View {
                 }
             }
             .fullScreenCover(item: $nested) { item in
-                FilePreviewContainer(item: item) {
+                FilePreviewContainer(item: item, loadRemoteFile: loadRemoteFile) {
                     nested = nil
                 }
             }
@@ -193,98 +200,321 @@ struct ArchiveBrowserView: View {
         case .image:
             .comic(title: url.lastPathComponent, pages: [url], startIndex: 0)
         case .video, .audio:
-            .media(url)
+            makeMediaPlaylist(startingAt: url, in: files)
         default:
             .document(url)
         }
     }
 }
 
+func makeMediaPlaylist(startingAt url: URL, in files: [URL]) -> FilePreviewItem {
+    let siblings = files.filter { FileKind(url: $0).isPlayable }
+    let list = siblings.isEmpty ? [url] : siblings
+    let index = list.firstIndex(of: url) ?? 0
+    return .media(
+        playlist: list.map { MediaPlaylistItem(name: $0.lastPathComponent, remotePath: nil, localURL: $0) },
+        startIndex: index
+    )
+}
+
 struct RemoteMediaPlayerView: View {
-    let url: URL
+    @State private var items: [MediaPlaylistItem]
+    @State private var index: Int
+    var loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?
     var onClose: () -> Void
 
     @StateObject private var playback = VLCPlaybackController()
+    @State private var controlsVisible = true
+    @State private var isLoadingTrack = false
+    @State private var skipHint: String?
+    @State private var hideTask: Task<Void, Never>?
+    @State private var loadError: String?
+
+    init(
+        playlist: [MediaPlaylistItem],
+        startIndex: Int,
+        loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?,
+        onClose: @escaping () -> Void
+    ) {
+        _items = State(initialValue: playlist)
+        _index = State(initialValue: min(max(startIndex, 0), max(playlist.count - 1, 0)))
+        self.loadRemoteFile = loadRemoteFile
+        self.onClose = onClose
+    }
 
     var body: some View {
-        NavigationStack {
+        GeometryReader { geometry in
+            let landscape = geometry.size.width > geometry.size.height
             ZStack {
                 Color.black.ignoresSafeArea()
                 VLCVideoSurface(controller: playback)
                     .ignoresSafeArea()
-                if !playback.hasVideo {
-                    VStack(spacing: 16) {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 56))
-                        Text(url.lastPathComponent)
-                            .font(.headline)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                    .foregroundStyle(.white)
-                    .allowsHitTesting(false)
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleControls() }
+                    .gesture(seekSwipe)
+
+                if !playback.hasVideo && !isLoadingTrack {
+                    audioPlaceholder
+                        .allowsHitTesting(false)
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
-                mediaControls
-            }
-            .navigationTitle(url.lastPathComponent)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", action: onClose)
+
+                if isLoadingTrack {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(1.2)
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    ShareLink(item: url) {
-                        Image(systemName: "square.and.arrow.up")
+
+                if let skipHint {
+                    Text(skipHint)
+                        .font(.title2.weight(.semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 10)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .foregroundStyle(.white)
+                }
+
+                if controlsVisible {
+                    VStack(spacing: 0) {
+                        topBar
+                            .padding(.top, landscape ? 8 : 4)
+                        Spacer()
+                        bottomBar
+                            .padding(.bottom, landscape ? 8 : 4)
                     }
+                    .transition(.opacity)
                 }
             }
         }
+        .background(Color.black.ignoresSafeArea())
+        .statusBarHidden(!controlsVisible)
+        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         .preferredColorScheme(.dark)
-        .onAppear { playback.open(url) }
-        .onDisappear { playback.stop() }
+        .task { await openCurrent(autoplay: true) }
+        .onChange(of: playback.didFinish) { _, finished in
+            guard finished else { return }
+            Task { await advance(by: 1, auto: true) }
+        }
+        .onDisappear {
+            hideTask?.cancel()
+            playback.stop()
+        }
     }
 
-    private var mediaControls: some View {
-        VStack(spacing: 10) {
-            Slider(
-                value: Binding(
-                    get: { Double(playback.isSeeking ? playback.seekPosition : playback.position) },
-                    set: { playback.seekPosition = Float($0) }
-                ),
-                in: 0...1,
-                onEditingChanged: { editing in
-                    playback.isSeeking = editing
-                    if !editing {
-                        playback.seek(to: playback.seekPosition)
-                    }
+    private var current: MediaPlaylistItem? {
+        items.indices.contains(index) ? items[index] : nil
+    }
+
+    private var audioPlaceholder: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "waveform")
+                .font(.system(size: 56))
+            Text(current?.name ?? "")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .foregroundStyle(.white)
+    }
+
+    private var topBar: some View {
+        HStack {
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.body.weight(.semibold))
+                    .padding(10)
+                    .background(.black.opacity(0.45), in: Circle())
+            }
+            .accessibilityLabel("Close")
+            Spacer()
+            VStack(spacing: 2) {
+                Text(current?.name ?? "")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if items.count > 1 {
+                    Text("\(index + 1) / \(items.count)")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
                 }
-            )
+            }
+            .foregroundStyle(.white)
+            Spacer()
+            if let url = current?.localURL {
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.semibold))
+                        .padding(10)
+                        .background(.black.opacity(0.45), in: Circle())
+                }
+            } else {
+                Color.clear.frame(width: 40, height: 40)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 10) {
             HStack {
                 Text(playback.elapsedText)
                     .font(.caption.monospacedDigit())
-                Spacer()
-                Button {
-                    playback.togglePlay()
-                } label: {
-                    Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title2)
-                }
-                Spacer()
-                Text(playback.remainingText)
+                Slider(
+                    value: Binding(
+                        get: { playback.displayedProgress },
+                        set: { playback.seekPosition = $0 }
+                    ),
+                    in: 0...1,
+                    onEditingChanged: { editing in
+                        playback.isSeeking = editing
+                        if editing {
+                            hideTask?.cancel()
+                        } else {
+                            playback.seek(to: playback.seekPosition)
+                            scheduleHide()
+                        }
+                    }
+                )
+                .tint(.white)
+                Text(playback.durationText)
                     .font(.caption.monospacedDigit())
             }
-            if let status = playback.statusMessage {
+            HStack(spacing: 36) {
+                Button {
+                    Task { await advance(by: -1, auto: false) }
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.title2)
+                }
+                .disabled(items.count < 2)
+                .opacity(items.count < 2 ? 0.35 : 1)
+
+                Button {
+                    playback.togglePlay()
+                    scheduleHide()
+                } label: {
+                    Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.largeTitle)
+                }
+
+                Button {
+                    Task { await advance(by: 1, auto: false) }
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.title2)
+                }
+                .disabled(items.count < 2)
+                .opacity(items.count < 2 ? 0.35 : 1)
+            }
+            if let loadError {
+                Text(loadError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if let status = playback.statusMessage {
                 Text(status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
+        .foregroundStyle(.white)
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(.black.opacity(0.45))
+    }
+
+    private var seekSwipe: some Gesture {
+        DragGesture(minimumDistance: 24)
+            .onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > abs(dy), abs(dx) > 40 else { return }
+                let seconds = min(max(Int((dx / 70).rounded()) * 10, -120), 120)
+                guard seconds != 0 else { return }
+                playback.skip(seconds: seconds)
+                showSkipHint(seconds)
+                revealControls()
+            }
+    }
+
+    private func toggleControls() {
+        if controlsVisible {
+            hideTask?.cancel()
+            withAnimation(.easeOut(duration: 0.2)) { controlsVisible = false }
+        } else {
+            revealControls()
+        }
+    }
+
+    private func revealControls() {
+        withAnimation(.easeIn(duration: 0.15)) { controlsVisible = true }
+        scheduleHide()
+    }
+
+    private func scheduleHide() {
+        hideTask?.cancel()
+        hideTask = Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled, playback.isPlaying, !playback.isSeeking else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.25)) { controlsVisible = false }
+            }
+        }
+    }
+
+    private func showSkipHint(_ seconds: Int) {
+        skipHint = seconds > 0 ? "+\(seconds)s" : "\(seconds)s"
+        Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            if skipHint == (seconds > 0 ? "+\(seconds)s" : "\(seconds)s") {
+                skipHint = nil
+            }
+        }
+    }
+
+    private func openCurrent(autoplay: Bool) async {
+        guard items.indices.contains(index) else { return }
+        loadError = nil
+        if items[index].localURL == nil, let remote = items[index].remoteEntry, let loadRemoteFile {
+            isLoadingTrack = true
+            do {
+                items[index].localURL = try await loadRemoteFile(remote)
+            } catch {
+                loadError = error.localizedDescription
+                isLoadingTrack = false
+                return
+            }
+            isLoadingTrack = false
+        }
+        guard let url = items[index].localURL else {
+            loadError = "Could not open this file."
+            return
+        }
+        playback.open(url, autoplay: autoplay)
+        revealControls()
+        prefetchNeighbor(offset: 1)
+    }
+
+    private func advance(by delta: Int, auto: Bool) async {
+        guard !items.isEmpty else { return }
+        let next = index + delta
+        if auto, next >= items.count {
+            playback.didFinish = false
+            playback.isPlaying = false
+            revealControls()
+            return
+        }
+        index = (next % items.count + items.count) % items.count
+        await openCurrent(autoplay: true)
+    }
+
+    private func prefetchNeighbor(offset: Int) {
+        let next = index + offset
+        guard items.indices.contains(next), items[next].localURL == nil,
+              let remote = items[next].remoteEntry, let loadRemoteFile
+        else { return }
+        Task {
+            if let url = try? await loadRemoteFile(remote), items.indices.contains(next) {
+                items[next].localURL = url
+            }
+        }
     }
 }
 
@@ -293,43 +523,88 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
     let player = VLCMediaPlayer()
     @Published var isPlaying = false
     @Published var hasVideo = false
-    @Published var position: Float = 0
-    @Published var seekPosition: Float = 0
+    @Published var seekPosition: Double = 0
     @Published var isSeeking = false
     @Published var elapsedText = "00:00"
-    @Published var remainingText = "--:--"
+    @Published var durationText = "00:00"
     @Published var statusMessage: String?
+    @Published var didFinish = false
+    @Published private(set) var progress: Double = 0
+
+    private var ticker: Timer?
+    private var ignoreEnded = false
+
+    var displayedProgress: Double {
+        isSeeking ? seekPosition : progress
+    }
 
     override init() {
         super.init()
         player.delegate = self
+        ticker = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.syncTime()
+            }
+        }
+        if let ticker {
+            RunLoop.main.add(ticker, forMode: .common)
+        }
     }
 
     func attach(drawable: UIView) {
         player.drawable = drawable
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, autoplay: Bool) {
+        ignoreEnded = true
+        didFinish = false
         statusMessage = nil
+        progress = 0
+        seekPosition = 0
+        elapsedText = "00:00"
+        durationText = "00:00"
+        player.stop()
         player.media = VLCMedia(url: url)
-        player.play()
+        ignoreEnded = false
+        if autoplay {
+            player.play()
+        }
+        isPlaying = autoplay
     }
 
     func togglePlay() {
         if player.isPlaying {
             player.pause()
+            isPlaying = false
         } else {
             player.play()
+            isPlaying = true
         }
-        isPlaying = player.isPlaying
     }
 
-    func seek(to value: Float) {
-        player.position = min(max(value, 0), 1)
-        position = player.position
+    func seek(to value: Double) {
+        let clamped = min(max(value, 0), 1)
+        if let length = durationMs, length > 0 {
+            let target = Int64(clamped * Double(length))
+            player.time = VLCTime(int: Int32(clamping: target))
+        } else {
+            player.position = Float(clamped)
+        }
+        progress = clamped
+        seekPosition = clamped
+        syncTime()
+    }
+
+    func skip(seconds: Int) {
+        guard let length = durationMs, length > 0 else { return }
+        let next = min(max((elapsedMs ?? 0) + Int64(seconds) * 1000, 0), length)
+        seek(to: Double(next) / Double(length))
     }
 
     func stop() {
+        ignoreEnded = true
+        ticker?.invalidate()
+        ticker = nil
         player.stop()
         player.drawable = nil
     }
@@ -346,6 +621,17 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
         }
     }
 
+    private var elapsedMs: Int64? {
+        player.time.value?.int64Value
+    }
+
+    private var durationMs: Int64? {
+        if let length = player.media?.length.value?.int64Value, length > 0 {
+            return length
+        }
+        return nil
+    }
+
     private func syncState() {
         isPlaying = player.isPlaying
         hasVideo = player.hasVideoOut || player.videoSize.width > 0
@@ -354,25 +640,36 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
             statusMessage = "This file could not be played."
         case .ended:
             isPlaying = false
-            position = 1
+            progress = 1
+            if !ignoreEnded {
+                didFinish = true
+            }
         default:
             if player.isPlaying { statusMessage = nil }
         }
     }
 
     private func syncTime() {
+        let elapsed = max(elapsedMs ?? 0, 0)
+        let duration = max(durationMs ?? 0, 0)
         if !isSeeking {
-            position = player.position
-            seekPosition = player.position
+            if duration > 0 {
+                progress = min(Double(elapsed) / Double(duration), 1)
+            } else if player.position.isFinite, player.position > 0 {
+                progress = Double(player.position)
+            }
+            seekPosition = progress
         }
-        elapsedText = Self.format(player.time)
-        remainingText = Self.format(player.remainingTime)
+        elapsedText = Self.format(milliseconds: elapsed)
+        durationText = duration > 0 ? Self.format(milliseconds: duration) : "--:--"
         hasVideo = player.hasVideoOut || player.videoSize.width > 0
+        if !ignoreEnded, duration > 0, elapsed + 250 >= duration, player.state == .ended || !player.isPlaying && progress > 0.98 {
+            if !didFinish { didFinish = true }
+        }
     }
 
-    private static func format(_ time: VLCTime?) -> String {
-        guard let value = time?.value?.int64Value else { return "--:--" }
-        let total = abs(value) / 1000
+    private static func format(milliseconds: Int64) -> String {
+        let total = abs(milliseconds) / 1000
         let hours = total / 3600
         let minutes = (total % 3600) / 60
         let seconds = total % 60

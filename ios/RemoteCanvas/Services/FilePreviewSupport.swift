@@ -54,11 +54,33 @@ enum FileKind {
     static func isImage(fileName: String) -> Bool {
         FileKind(fileName: fileName) == .image
     }
+
+    var isPlayable: Bool {
+        self == .video || self == .audio
+    }
+}
+
+struct MediaPlaylistItem: Identifiable, Hashable, Sendable {
+    var id: String { remotePath ?? localURL?.path ?? name }
+    let name: String
+    let remotePath: String?
+    var localURL: URL?
+
+    var remoteEntry: RemoteFileEntry? {
+        guard let remotePath else { return nil }
+        return RemoteFileEntry(
+            name: name,
+            path: remotePath,
+            isDirectory: false,
+            size: 0,
+            modifiedUnixSeconds: 0
+        )
+    }
 }
 
 enum FilePreviewItem: Identifiable {
     case comic(title: String, pages: [URL], startIndex: Int)
-    case media(URL)
+    case media(playlist: [MediaPlaylistItem], startIndex: Int)
     case document(URL)
     case archive(title: String, files: [URL])
 
@@ -68,7 +90,9 @@ enum FilePreviewItem: Identifiable {
             pages.first?.path ?? "comic-\(start)"
         case .archive(_, let files):
             files.first?.path ?? "archive"
-        case .media(let url), .document(let url):
+        case .media(let playlist, let start):
+            playlist.first?.id ?? "media-\(start)"
+        case .document(let url):
             url.path
         }
     }

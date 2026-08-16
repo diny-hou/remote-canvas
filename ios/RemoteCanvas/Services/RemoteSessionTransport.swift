@@ -49,6 +49,7 @@ protocol RemoteSessionTransport: AnyObject {
     func disconnect() async
     func listFiles(path: String) async throws -> [RemoteFileEntry]
     func download(_ file: RemoteFileEntry) async throws -> URL
+    func download(_ file: RemoteFileEntry, into directory: URL) async throws -> URL
     func upload(localURL: URL, to directory: String) async throws
 }
 
@@ -73,6 +74,9 @@ final class PreviewRemoteSessionTransport: RemoteSessionTransport {
     func disconnect() async {}
     func listFiles(path: String) async throws -> [RemoteFileEntry] { [] }
     func download(_ file: RemoteFileEntry) async throws -> URL { URL(fileURLWithPath: "/") }
+    func download(_ file: RemoteFileEntry, into directory: URL) async throws -> URL {
+        directory.appendingPathComponent(file.name)
+    }
     func upload(localURL: URL, to directory: String) async throws {}
 }
 
@@ -310,6 +314,17 @@ final class LiveRemoteSession: RemoteSessionTransport {
     }
 
     func download(_ file: RemoteFileEntry) async throws -> URL {
+        try await download(
+            file,
+            into: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        )
+    }
+
+    func download(_ file: RemoteFileEntry, into directory: URL) async throws -> URL {
+        let destination = directory.appendingPathComponent(file.name)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return destination
+        }
         var request = try apiRequest(path: "/api/file", queryItems: [URLQueryItem(name: "path", value: file.path)])
         request.httpMethod = "GET"
         request.timeoutInterval = 6 * 60 * 60
@@ -318,10 +333,10 @@ final class LiveRemoteSession: RemoteSessionTransport {
             let details = (try? Data(contentsOf: temporaryURL)) ?? Data()
             try validate(response: response, data: details)
         }
-        let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            .appendingPathComponent(file.name)
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
         return destination
     }
