@@ -1,20 +1,19 @@
 mod remote_host;
+mod updater;
 
 use qrcode::{render::svg, QrCode};
-use remote_host::{RemoteHostState, PAIRING_TTL_SECONDS};
+use remote_host::{discover_endpoints, RemoteHostState, PAIRING_TTL_SECONDS};
 use serde::Serialize;
-
-const UPDATE_URL: &str = "https://github.com/diny-hou/remote-canvas/releases/latest";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostStatus {
     version: &'static str,
-    service_state: &'static str,
+    service_state: String,
     host_name: String,
-    access_key_configured: bool,
-    transport: &'static str,
     endpoint: String,
+    lan_endpoint: String,
+    tailscale_endpoint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -27,41 +26,48 @@ struct PairingResponse {
     expires_in_seconds: u64,
 }
 
+fn host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into())
+}
+
 #[tauri::command]
 fn host_status(state: tauri::State<'_, RemoteHostState>) -> HostStatus {
+    let endpoints = discover_endpoints();
     HostStatus {
         version: env!("CARGO_PKG_VERSION"),
-        service_state: "配信中",
-        host_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into()),
-        access_key_configured: true,
-        transport: "Tailscale / LAN・認証付きストリーム",
-        endpoint: (*state.endpoint).clone(),
+        service_state: state.service_state(),
+        host_name: host_name(),
+        endpoint: endpoints.lan.clone(),
+        lan_endpoint: endpoints.lan,
+        tailscale_endpoint: endpoints.tailscale,
     }
 }
 
 #[tauri::command]
 fn begin_pairing(state: tauri::State<'_, RemoteHostState>) -> Result<PairingResponse, String> {
-    let host_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into());
-    let endpoint = (*state.endpoint).clone();
+    let host_name = host_name();
+    let endpoints = discover_endpoints();
     let pairing_code = state.begin_pairing();
     let payload = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "name": host_name,
-        "endpoint": endpoint,
         "code": pairing_code,
+        "certSha256": state.cert_sha256(),
+        "endpoint": endpoints.lan,
+        "endpoints": endpoints.all(),
     })
     .to_string();
     let qr_code = QrCode::new(payload.as_bytes()).map_err(|error| error.to_string())?;
     let qr_svg = qr_code
         .render::<svg::Color>()
         .min_dimensions(248, 248)
-        .dark_color(svg::Color("#07101a"))
+        .dark_color(svg::Color("#111111"))
         .light_color(svg::Color("#ffffff"))
         .build();
 
     Ok(PairingResponse {
         host_name,
-        endpoint,
+        endpoint: endpoints.lan,
         pairing_code,
         qr_svg,
         expires_in_seconds: PAIRING_TTL_SECONDS,
@@ -69,20 +75,17 @@ fn begin_pairing(state: tauri::State<'_, RemoteHostState>) -> Result<PairingResp
 }
 
 #[tauri::command]
-fn open_update_page() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", UPDATE_URL])
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("更新ページを開けませんでした: {error}"))
-    }
+async fn rotate_keys(state: tauri::State<'_, RemoteHostState>) -> Result<(), String> {
+    state.rotate_keys().await
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err(format!("Windows版の更新ページ: {UPDATE_URL}"))
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<updater::UpdateStatus, String> {
+    let result = updater::install_latest(env!("CARGO_PKG_VERSION")).await?;
+    if result.status == "installing" {
+        app.exit(0);
     }
+    Ok(result)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -99,7 +102,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             host_status,
             begin_pairing,
-            open_update_page
+            rotate_keys,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run RemoteCanvas host");

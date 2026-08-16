@@ -5,13 +5,16 @@ and status UI.
 
 ## Runtime behavior
 
-- Listens on TCP port `47831` on all interfaces.
-- Prefers an active Tailscale IPv4 address for the endpoint shown in the UI.
-- Persists a random 192-bit key in
-  `%APPDATA%\RemoteCanvas\access-token.txt`.
-- Exchanges a five-minute, six-digit pairing code for that key; the code is
-  single-use and locks after five failed attempts.
-- Streams the primary display as JPEG over an authenticated WebSocket.
+- Listens on HTTPS port `47831` on all interfaces.
+- Advertises the LAN address first and Tailscale when it is present.
+- Persists the TLS key and per-device tokens in a DPAPI-protected
+  `%APPDATA%\RemoteCanvas\host-state.bin`.
+- Exchanges a five-minute, six-digit pairing code for a device-specific key;
+  the code is single-use and locks after five failed attempts.
+- Streams the primary display as JPEG over an authenticated WebSocket. LAN
+  clients get a higher frame rate than Tailscale clients.
+- **Update** downloads the latest GitHub release installer and applies it
+  silently. **Rotate keys** revokes every phone and replaces the certificate.
 - Accepts pointer, click, scroll, and Unicode text input.
 - Allows authenticated file access only below the current user's Desktop,
   Documents, Downloads, Pictures, and Videos directories.
@@ -40,7 +43,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 The installer is written to:
 
 ```text
-src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.3.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.4.0_x64-setup.exe
 ```
 
 For a combined build/install attempt, use:
@@ -52,10 +55,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ## Network security
 
-For internet access, install Tailscale on both endpoints and keep RemoteCanvas
-behind that WireGuard network. RemoteCanvas does not operate a signaling,
-media, or file server. Plain LAN HTTP/WebSocket is provided for development and
-trusted private networks only; it is not safe on an untrusted Wi-Fi network.
+At home, keep both devices on the same Wi-Fi. RemoteCanvas prefers that LAN
+path automatically. For internet access, install Tailscale on both endpoints.
+TLS and certificate pinning cover the LAN path; Tailscale still adds its own
+WireGuard tunnel when you are away.
 
 ## MVP limitations
 

@@ -1,62 +1,33 @@
 import SwiftUI
 
-struct SecuritySettingsView: View {
+struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         @Bindable var appModel = appModel
 
         NavigationStack {
             Form {
-                Section {
-                    Toggle(isOn: $appModel.requireOwnerAuthentication) {
-                        Label("Face IDを要求", systemImage: "faceid")
-                    }
-                } header: {
-                    Text("接続承認")
-                } footer: {
-                    Text("接続開始前にFace ID、Touch ID、または端末パスコードで本人確認します。")
-                }
-
-                Section {
-                    Label("Tailscale / LANで直接接続", systemImage: "point.3.connected.trianglepath.dotted")
-                    Label("RemoteCanvas独自サーバー不使用", systemImage: "server.rack")
-                } header: {
-                    Text("ネットワーク")
-                } footer: {
-                    Text("外出先ではTailscaleのWireGuard暗号化を使います。現在の版に独自リレー機能はありません。")
-                }
-
-                Section("信頼済み端末") {
-                    LabeledContent("登録PC", value: "\(appModel.devices.count)台")
-                    LabeledContent("プロトコル", value: "remote-canvas/1")
-                    LabeledContent("接続キー", value: "Keychainに保存")
-                }
-
-                Section {
-                    LabeledContent("バージョン", value: appVersion)
-                    Button {
-                        openURL(URL(string: "https://github.com/diny-hou/remote-canvas/releases/latest")!)
-                    } label: {
-                        Label("アップデートを確認", systemImage: "arrow.down.circle")
-                    }
-                } header: {
-                    Text("アプリ")
-                } footer: {
-                    Text("Windows版の最新版を開きます。iPhone/iPad版の自動更新にはTestFlightまたはApp Store配布が必要です。")
+                Toggle("Require Face ID", isOn: $appModel.requireOwnerAuthentication)
+                LabeledContent("Version", value: appVersion)
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
                 }
             }
-            .navigationTitle("セキュリティ")
         }
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "不明"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 }
 
 #Preview {
-    SecuritySettingsView()
+    SettingsView()
         .environment(AppModel())
 }

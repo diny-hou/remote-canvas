@@ -8,47 +8,68 @@ import Security
 final class AppModel {
     enum PresentedSheet: Identifiable {
         case pairDevice
+        case settings
 
-        var id: String { "pair-device" }
+        var id: String {
+            switch self {
+            case .pairDevice: "pair-device"
+            case .settings: "settings"
+            }
+        }
     }
 
     var devices: [PairedDevice]
     var presentedSheet: PresentedSheet?
     var activeDevice: PairedDevice?
-    var requireOwnerAuthentication = true
+    var requireOwnerAuthentication: Bool {
+        didSet {
+            UserDefaults.standard.set(requireOwnerAuthentication, forKey: "requireOwnerAuthentication")
+        }
+    }
 
     init(devices: [PairedDevice]? = nil) {
         self.devices = devices ?? SecureDeviceStore.load()
+        if UserDefaults.standard.object(forKey: "requireOwnerAuthentication") == nil {
+            self.requireOwnerAuthentication = true
+        } else {
+            self.requireOwnerAuthentication = UserDefaults.standard.bool(forKey: "requireOwnerAuthentication")
+        }
     }
 
-    func registerDevice(name: String, endpoint: String, accessToken: String) throws {
-        let normalizedToken = accessToken
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedEndpoint = endpoint
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    func registerDevice(
+        name: String,
+        endpoints: [String],
+        accessToken: String,
+        certSha256: String
+    ) throws {
+        let normalizedToken = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEndpoints = endpoints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+            .filter { !$0.isEmpty }
+        let pin = certSha256.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         guard normalizedToken.count >= 12,
-              let url = URL(string: normalizedEndpoint),
+              !pin.isEmpty,
+              let primary = normalizedEndpoints.first,
+              let url = URL(string: primary),
               ["http", "https"].contains(url.scheme?.lowercased()) else {
             throw PairingError.invalidCode
         }
 
-        let suffix = normalizedToken.unicodeScalars
-            .map { String(format: "%02X", $0.value) }
-            .joined()
-            .suffix(12)
+        let suffix = pin.suffix(12)
         let fingerprint = stride(from: 0, to: suffix.count, by: 2).map { offset -> String in
             let start = suffix.index(suffix.startIndex, offsetBy: offset)
             let end = suffix.index(start, offsetBy: min(2, suffix.distance(from: start, to: suffix.endIndex)))
-            return String(suffix[start..<end])
+            return String(suffix[start..<end]).uppercased()
         }.joined(separator: ":")
 
         devices.append(
             PairedDevice(
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Windows PC" : name,
                 fingerprint: fingerprint,
-                endpoint: normalizedEndpoint,
+                endpoint: primary,
+                endpoints: normalizedEndpoints,
+                certSha256: pin,
                 accessToken: normalizedToken,
                 availability: .online
             )
@@ -59,10 +80,10 @@ final class AppModel {
     func connect(to device: PairedDevice) async throws {
         if requireOwnerAuthentication {
             let context = LAContext()
-            context.localizedCancelTitle = "キャンセル"
+            context.localizedCancelTitle = "Cancel"
             try await context.evaluatePolicy(
                 .deviceOwnerAuthentication,
-                localizedReason: "登録済みWindows PCへ接続します"
+                localizedReason: "Connect to this PC"
             )
         }
         activeDevice = device
@@ -88,7 +109,7 @@ enum PairingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCode:
-            "接続先URLまたはWindowsから受け取った端末鍵が正しくありません。"
+            "Invalid endpoint or pairing key."
         }
     }
 }

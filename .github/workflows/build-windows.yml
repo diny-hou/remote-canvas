@@ -53,4 +53,4 @@ jobs:
         run: |
           $installer = Get-ChildItem "target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
           if (-not $installer) { throw "Windows installer was not found" }
-          gh release create "$env:GITHUB_REF_NAME" "$($installer.FullName)#RemoteCanvas Windows Installer" --title "RemoteCanvas $env:GITHUB_REF_NAME" --generate-notes
+          gh release create "$env:GITHUB_REF_NAME" "$($installer.FullName)#RemoteCanvasHost-setup.exe" --title "RemoteCanvas $env:GITHUB_REF_NAME" --generate-notes

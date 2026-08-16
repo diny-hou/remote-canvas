@@ -1,26 +1,33 @@
+mod store;
+
 use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Query, State,
+        ConnectInfo, DefaultBodyLimit, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use rand::{rngs::OsRng, Rng, RngCore};
+use axum_server::tls_rustls::RustlsConfig;
+use rand::{rngs::OsRng, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use store::{append_session_log, now_unix, DeviceRecord, PersistedState};
 
 pub const HOST_PORT: u16 = 47_831;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub const PAIRING_TTL_SECONDS: u64 = 5 * 60;
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
+const REPLAY_WINDOW_SECS: i64 = 90;
 
 struct PairingSession {
     code: Option<String>,
@@ -39,52 +46,94 @@ impl PairingSession {
 }
 
 #[derive(Clone)]
+struct ActiveSession {
+    device_name: String,
+    via: String,
+}
+
+struct HostInner {
+    persisted: PersistedState,
+    replay: HashMap<String, Instant>,
+    active: Option<ActiveSession>,
+    persist: bool,
+}
+
+#[derive(Clone)]
 pub struct RemoteHostState {
-    pub access_token: Arc<String>,
-    pub endpoint: Arc<String>,
     pairing: Arc<Mutex<PairingSession>>,
+    inner: Arc<Mutex<HostInner>>,
+    tls: Arc<Mutex<Option<RustlsConfig>>>,
+}
+
+#[derive(Clone)]
+pub struct HostEndpoints {
+    pub lan: String,
+    pub tailscale: Option<String>,
+}
+
+impl HostEndpoints {
+    pub fn all(&self) -> Vec<String> {
+        let mut endpoints = vec![self.lan.clone()];
+        if let Some(tailscale) = &self.tailscale {
+            if tailscale != &self.lan {
+                endpoints.push(tailscale.clone());
+            }
+        }
+        endpoints
+    }
 }
 
 impl RemoteHostState {
     pub fn load() -> Self {
-        let access_token = load_or_create_token();
-        let address = local_ip_address::list_afinet_netifas()
-            .ok()
-            .and_then(|interfaces| {
-                interfaces
-                    .into_iter()
-                    .map(|(_, address)| address)
-                    .find(is_tailscale_address)
-            })
-            .or_else(|| local_ip_address::local_ip().ok())
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "127.0.0.1".into());
-
         Self {
-            access_token: Arc::new(access_token),
-            endpoint: Arc::new(format!("http://{address}:{HOST_PORT}")),
             pairing: Arc::new(Mutex::new(PairingSession::inactive())),
+            inner: Arc::new(Mutex::new(HostInner {
+                persisted: PersistedState::load_or_create(),
+                replay: HashMap::new(),
+                active: None,
+                persist: true,
+            })),
+            tls: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn begin_pairing(&self) -> String {
         let code = format!("{:06}", OsRng.gen_range(0..1_000_000_u32));
-        let mut pairing = self
-            .pairing
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut pairing = lock(&self.pairing);
         pairing.code = Some(code.clone());
         pairing.expires_at = Instant::now() + Duration::from_secs(PAIRING_TTL_SECONDS);
         pairing.failed_attempts = 0;
         code
     }
 
-    fn redeem_pairing_code(&self, provided: &str) -> Option<String> {
-        let mut pairing = self
-            .pairing
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+    pub fn cert_sha256(&self) -> String {
+        lock(&self.inner).persisted.cert_sha256.clone()
+    }
 
+    pub fn device_count(&self) -> usize {
+        lock(&self.inner).persisted.devices.len()
+    }
+
+    pub fn service_state(&self) -> String {
+        match &lock(&self.inner).active {
+            Some(session) => format!("Connected · {} · {}", session.device_name, session.via),
+            None => "Live".into(),
+        }
+    }
+
+    pub async fn rotate_keys(&self) -> Result<(), String> {
+        {
+            let mut inner = lock(&self.inner);
+            inner.persisted.rotate_identity();
+            inner.replay.clear();
+            inner.active = None;
+        }
+        lock(&self.pairing).code = None;
+        self.reload_tls().await
+    }
+
+    fn redeem_pairing_code(&self, provided: &str, client_name: &str) -> Option<DeviceRecord> {
+        let mut pairing = lock(&self.pairing);
         if pairing.code.is_none()
             || Instant::now() > pairing.expires_at
             || pairing.failed_attempts >= MAX_PAIRING_ATTEMPTS
@@ -107,17 +156,174 @@ impl RemoteHostState {
         }
 
         pairing.code = None;
-        Some((*self.access_token).clone())
+        drop(pairing);
+        let mut inner = lock(&self.inner);
+        let device = inner.persisted.issue_device(client_name);
+        if inner.persist {
+            inner.persisted.save();
+        }
+        Some(device)
+    }
+
+    fn check_replay(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let timestamp = headers
+            .get("x-rc-ts")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let nonce = headers
+            .get("x-rc-nonce")
+            .and_then(|value| value.to_str().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        if nonce.len() < 16 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if ((now_unix() as i64) - timestamp).abs() > REPLAY_WINDOW_SECS {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
+        let mut inner = lock(&self.inner);
+        inner
+            .replay
+            .retain(|_, seen| seen.elapsed() < Duration::from_secs(120));
+        if inner.replay.contains_key(nonce) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        inner.replay.insert(nonce.to_string(), Instant::now());
+        Ok(())
+    }
+
+    fn device_from_bearer(&self, headers: &HeaderMap) -> Option<DeviceRecord> {
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))?;
+        let inner = lock(&self.inner);
+        let mut found = None;
+        for device in &inner.persisted.devices {
+            if constant_time_equal(device.token.as_bytes(), token.as_bytes()) {
+                found = Some(device.clone());
+            }
+        }
+        found
+    }
+
+    fn mark_connected(&self, device: &DeviceRecord, via: &str) {
+        let mut inner = lock(&self.inner);
+        inner.persisted.touch_device(&device.id);
+        if inner.persist {
+            inner.persisted.save();
+        }
+        inner.active = Some(ActiveSession {
+            device_name: device.name.clone(),
+            via: via.to_string(),
+        });
+    }
+
+    fn mark_disconnected(&self) {
+        lock(&self.inner).active = None;
+    }
+
+    fn tls_pem(&self) -> (Vec<u8>, Vec<u8>) {
+        let inner = lock(&self.inner);
+        (
+            inner.persisted.cert_pem.as_bytes().to_vec(),
+            inner.persisted.key_pem.as_bytes().to_vec(),
+        )
+    }
+
+    async fn reload_tls(&self) -> Result<(), String> {
+        let (cert, key) = self.tls_pem();
+        if let Some(tls) = lock(&self.tls).clone() {
+            tls.reload_from_pem(cert, key)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
-fn is_tailscale_address(address: &std::net::IpAddr) -> bool {
+pub fn discover_endpoints() -> HostEndpoints {
+    let interfaces = local_ip_address::list_afinet_netifas().unwrap_or_default();
+    let addresses = interfaces
+        .into_iter()
+        .map(|(_, address)| address)
+        .collect::<Vec<_>>();
+    let lan = addresses
+        .iter()
+        .copied()
+        .find(is_private_lan)
+        .or_else(|| local_ip_address::local_ip().ok())
+        .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
+    let tailscale = addresses.iter().copied().find(is_tailscale_address);
+    HostEndpoints {
+        lan: https_endpoint(lan),
+        tailscale: tailscale.map(https_endpoint),
+    }
+}
+
+fn https_endpoint(address: IpAddr) -> String {
     match address {
-        std::net::IpAddr::V4(address) => {
+        IpAddr::V6(ip) => format!("https://[{ip}]:{HOST_PORT}"),
+        IpAddr::V4(ip) => format!("https://{ip}:{HOST_PORT}"),
+    }
+}
+
+fn is_tailscale_address(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
             let octets = address.octets();
             octets[0] == 100 && (64..=127).contains(&octets[1])
         }
-        std::net::IpAddr::V6(_) => false,
+        IpAddr::V6(_) => false,
+    }
+}
+
+fn is_private_lan(address: &IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || octets[0] == 127
+        }
+        IpAddr::V6(address) => address.is_loopback(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StreamQuality {
+    interval_ms: u64,
+    jpeg_quality: u8,
+    max_width: u32,
+}
+
+const LAN_QUALITY: StreamQuality = StreamQuality {
+    interval_ms: 50,
+    jpeg_quality: 85,
+    max_width: 1920,
+};
+
+const REMOTE_QUALITY: StreamQuality = StreamQuality {
+    interval_ms: 100,
+    jpeg_quality: 72,
+    max_width: 1440,
+};
+
+fn stream_quality(headers: &HeaderMap, addr: SocketAddr) -> (StreamQuality, &'static str) {
+    if let Some(path) = headers.get("x-rc-path").and_then(|value| value.to_str().ok()) {
+        if path.eq_ignore_ascii_case("lan") {
+            return (LAN_QUALITY, "lan");
+        }
+        if path.eq_ignore_ascii_case("tailscale") {
+            return (REMOTE_QUALITY, "tailscale");
+        }
+    }
+    if is_private_lan(&addr.ip()) {
+        (LAN_QUALITY, "lan")
+    } else {
+        (REMOTE_QUALITY, "tailscale")
     }
 }
 
@@ -146,14 +352,20 @@ struct HealthResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PairingRequest {
     code: String,
+    #[serde(default)]
+    client_name: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PairingCredentials {
     access_token: String,
+    device_id: String,
+    cert_sha256: String,
+    endpoints: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -173,6 +385,16 @@ enum ClientCommand {
 
 pub fn start(state: RemoteHostState) {
     tauri::async_runtime::spawn(async move {
+        let (cert_pem, key_pem) = state.tls_pem();
+        let tls = match RustlsConfig::from_pem(cert_pem, key_pem).await {
+            Ok(tls) => tls,
+            Err(error) => {
+                eprintln!("RemoteCanvas host could not load TLS: {error}");
+                return;
+            }
+        };
+        *lock(&state.tls) = Some(tls.clone());
+
         let app = Router::new()
             .route("/health", get(health))
             .route("/api/pair", post(pair_device))
@@ -182,15 +404,11 @@ pub fn start(state: RemoteHostState) {
             .layer(DefaultBodyLimit::max(MAX_FILE_BYTES as usize))
             .with_state(state);
 
-        let listener = match tokio::net::TcpListener::bind(("0.0.0.0", HOST_PORT)).await {
-            Ok(listener) => listener,
-            Err(error) => {
-                eprintln!("RemoteCanvas host could not bind port {HOST_PORT}: {error}");
-                return;
-            }
-        };
-
-        if let Err(error) = axum::serve(listener, app).await {
+        let addr = SocketAddr::from(([0, 0, 0, 0], HOST_PORT));
+        if let Err(error) = axum_server::bind_rustls(addr, tls)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+        {
             eprintln!("RemoteCanvas host stopped: {error}");
         }
     });
@@ -200,9 +418,15 @@ async fn pair_device(
     State(state): State<RemoteHostState>,
     Json(request): Json<PairingRequest>,
 ) -> Response {
-    match state.redeem_pairing_code(&request.code) {
-        Some(access_token) => Json(PairingCredentials { access_token }).into_response(),
-        None => (StatusCode::UNAUTHORIZED, "コードが無効または期限切れです").into_response(),
+    match state.redeem_pairing_code(&request.code, &request.client_name) {
+        Some(device) => Json(PairingCredentials {
+            access_token: device.token,
+            device_id: device.id,
+            cert_sha256: state.cert_sha256(),
+            endpoints: discover_endpoints().all(),
+        })
+        .into_response(),
+        None => (StatusCode::UNAUTHORIZED, "Invalid or expired code").into_response(),
     }
 }
 
@@ -215,28 +439,51 @@ async fn health() -> Json<HealthResponse> {
 
 async fn websocket_upgrade(
     State(state): State<RemoteHostState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !authorized(&headers, &state) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    ws.on_upgrade(handle_websocket)
+    let device = match authorize(&headers, &state) {
+        Ok(device) => device,
+        Err(status) => return status.into_response(),
+    };
+    let (quality, via) = stream_quality(&headers, addr);
+    state.mark_connected(&device, via);
+    append_session_log(&format!(
+        "{} connected {} {} {via}",
+        now_unix(),
+        device.name,
+        addr
+    ));
+    notify_connected(&device.name, via);
+    let disconnect_state = state.clone();
+    ws.on_upgrade(move |socket| async move {
+        handle_websocket(socket, quality).await;
+        disconnect_state.mark_disconnected();
+    })
 }
 
-async fn handle_websocket(mut socket: WebSocket) {
-    let mut frame_timer = tokio::time::interval(Duration::from_millis(125));
+async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
+    let mut frame_timer = tokio::time::interval(Duration::from_millis(quality.interval_ms));
     frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ping_timer = tokio::time::interval(Duration::from_secs(5));
+    ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = frame_timer.tick() => {
-                let frame = tokio::task::spawn_blocking(capture_primary_display).await;
+                let frame = tokio::task::spawn_blocking(move || {
+                    capture_primary_display(quality.max_width, quality.jpeg_quality)
+                }).await;
                 if let Ok(Ok(jpeg)) = frame {
                     if socket.send(Message::Binary(jpeg.into())).await.is_err() {
                         break;
                     }
+                }
+            }
+            _ = ping_timer.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
                 }
             }
             incoming = socket.recv() => {
@@ -246,6 +493,7 @@ async fn handle_websocket(mut socket: WebSocket) {
                             let _ = tokio::task::spawn_blocking(move || apply_input(command)).await;
                         }
                     }
+                    Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     _ => {}
                 }
@@ -259,7 +507,7 @@ async fn list_files(
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    if !authorized(&headers, &state) {
+    if authorize(&headers, &state).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -275,7 +523,7 @@ async fn download_file(
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    if !authorized(&headers, &state) {
+    if authorize(&headers, &state).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -321,7 +569,7 @@ async fn upload_file(
     Query(query): Query<PathQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !authorized(&headers, &state) {
+    if authorize(&headers, &state).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -357,6 +605,13 @@ async fn upload_file(
         }
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
+}
+
+fn authorize(headers: &HeaderMap, state: &RemoteHostState) -> Result<DeviceRecord, StatusCode> {
+    state.check_replay(headers)?;
+    state
+        .device_from_bearer(headers)
+        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
@@ -450,15 +705,6 @@ fn allowed_existing_path(raw_path: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn authorized(headers: &HeaderMap, state: &RemoteHostState) -> bool {
-    let expected = format!("Bearer {}", state.access_token);
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| constant_time_equal(value.as_bytes(), expected.as_bytes()))
-        .unwrap_or(false)
-}
-
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -469,39 +715,29 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn token_path() -> PathBuf {
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("RemoteCanvas").join("access-token.txt")
+fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    value.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-fn load_or_create_token() -> String {
-    let path = token_path();
-    if let Ok(token) = std::fs::read_to_string(&path) {
-        let token = token.trim();
-        if token.len() >= 32 {
-            return token.to_string();
-        }
+fn notify_connected(name: &str, via: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let body = format!("{name} connected · {via}").replace('\'', "''");
+        let script = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); $n = $t.GetElementsByTagName('text'); $n.Item(0).AppendChild($t.CreateTextNode('RemoteCanvas')) | Out-Null; $n.Item(1).AppendChild($t.CreateTextNode('{body}')) | Out-Null; [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('RemoteCanvas').Show([Windows.UI.Notifications.ToastNotification]::new($t))"
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+            .spawn();
     }
-
-    let mut random = [0_u8; 24];
-    OsRng.fill_bytes(&mut random);
-    let token = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (name, via);
     }
-    let _ = std::fs::write(path, &token);
-    token
 }
 
 #[cfg(target_os = "windows")]
-fn capture_primary_display() -> Result<Vec<u8>, String> {
+fn capture_primary_display(max_width: u32, jpeg_quality: u8) -> Result<Vec<u8>, String> {
     use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageBuffer, Rgba};
 
     let screen = primary_screen()?;
@@ -511,17 +747,17 @@ fn capture_primary_display() -> Result<Vec<u8>, String> {
     let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, captured.into_raw())
         .ok_or_else(|| "Invalid capture buffer".to_string())?;
     let mut image = DynamicImage::ImageRgba8(buffer);
-    if image.width() > 1440 {
-        let scaled_height = (image.height() as f64 * 1440.0 / image.width() as f64) as u32;
+    if image.width() > max_width {
+        let scaled_height = (image.height() as f64 * f64::from(max_width) / image.width() as f64) as u32;
         image = image.resize(
-            1440,
+            max_width,
             scaled_height.max(1),
             image::imageops::FilterType::Triangle,
         );
     }
 
     let mut bytes = Vec::with_capacity(256 * 1024);
-    JpegEncoder::new_with_quality(&mut bytes, 70)
+    JpegEncoder::new_with_quality(&mut bytes, jpeg_quality)
         .encode_image(&image)
         .map_err(|error| error.to_string())?;
     Ok(bytes)
@@ -539,7 +775,7 @@ fn primary_screen() -> Result<screenshots::Screen, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn capture_primary_display() -> Result<Vec<u8>, String> {
+fn capture_primary_display(_max_width: u32, _jpeg_quality: u8) -> Result<Vec<u8>, String> {
     Err("Screen capture is available in the Windows build".into())
 }
 
@@ -583,36 +819,65 @@ fn apply_input(command: ClientCommand) {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn apply_input(command: ClientCommand) {
+    match command {
+        ClientCommand::Pointer {
+            x,
+            y,
+            action,
+            delta,
+        } => {
+            let _ = (x, y, action, delta);
+        }
+        ClientCommand::Text { text } => {
+            let _ = text;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{constant_time_equal, is_tailscale_address, PairingSession, RemoteHostState};
+    use super::{
+        constant_time_equal, is_private_lan, is_tailscale_address, HostInner, PairingSession,
+        RemoteHostState,
+    };
+    use crate::remote_host::store::PersistedState;
+    use axum::http::HeaderMap;
     use std::{
+        collections::HashMap,
         net::{IpAddr, Ipv4Addr},
         sync::{Arc, Mutex},
     };
 
     fn state() -> RemoteHostState {
         RemoteHostState {
-            access_token: Arc::new("persistent-secret-token-for-tests".into()),
-            endpoint: Arc::new("http://100.64.0.1:47831".into()),
             pairing: Arc::new(Mutex::new(PairingSession::inactive())),
+            inner: Arc::new(Mutex::new(HostInner {
+                persisted: PersistedState {
+                    cert_pem: String::new(),
+                    key_pem: String::new(),
+                    cert_sha256: "ab".into(),
+                    devices: Vec::new(),
+                    key_version: 1,
+                },
+                replay: HashMap::new(),
+                active: None,
+                persist: false,
+            })),
+            tls: Arc::new(Mutex::new(None)),
         }
     }
 
     #[test]
     fn recognizes_tailscale_ipv4_range() {
-        assert!(is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(
-            100, 64, 0, 1
-        ))));
+        assert!(is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
         assert!(is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(
             100, 127, 255, 254
         ))));
-        assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(
-            100, 128, 0, 1
-        ))));
-        assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(
-            192, 168, 1, 10
-        ))));
+        assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
+        assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(is_private_lan(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
     }
 
     #[test]
@@ -628,11 +893,9 @@ mod tests {
         let code = state.begin_pairing();
         assert_eq!(code.len(), 6);
         assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
-        assert_eq!(
-            state.redeem_pairing_code(&code).as_deref(),
-            Some("persistent-secret-token-for-tests")
-        );
-        assert!(state.redeem_pairing_code(&code).is_none());
+        let first = state.redeem_pairing_code(&code, "iPhone").unwrap();
+        assert_eq!(first.token.len(), 48);
+        assert!(state.redeem_pairing_code(&code, "iPhone").is_none());
     }
 
     #[test]
@@ -641,25 +904,25 @@ mod tests {
         let code = state.begin_pairing();
         let wrong_code = if code == "000000" { "000001" } else { "000000" };
         for _ in 0..5 {
-            assert!(state.redeem_pairing_code(wrong_code).is_none());
+            assert!(state.redeem_pairing_code(wrong_code, "iPhone").is_none());
         }
-        assert!(state.redeem_pairing_code(&code).is_none());
+        assert!(state.redeem_pairing_code(&code, "iPhone").is_none());
     }
-}
 
-#[cfg(not(target_os = "windows"))]
-fn apply_input(command: ClientCommand) {
-    match command {
-        ClientCommand::Pointer {
-            x,
-            y,
-            action,
-            delta,
-        } => {
-            let _ = (x, y, action, delta);
-        }
-        ClientCommand::Text { text } => {
-            let _ = text;
-        }
+    #[test]
+    fn replay_nonce_is_rejected() {
+        let state = state();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rc-ts", now_header());
+        headers.insert("x-rc-nonce", "0123456789abcdef0123456789abcdef".parse().unwrap());
+        assert!(state.check_replay(&headers).is_ok());
+        assert!(state.check_replay(&headers).is_err());
+    }
+
+    fn now_header() -> axum::http::HeaderValue {
+        crate::remote_host::store::now_unix()
+            .to_string()
+            .parse()
+            .unwrap()
     }
 }

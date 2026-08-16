@@ -1,6 +1,6 @@
 [package]
 name = "remote-canvas-host"
-version = "0.3.0"
+version = "0.4.0"
 description = "RemoteCanvas Windows host shell"
 authors = ["RemoteCanvas"]
 edition = "2021"
@@ -15,11 +15,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 local-ip-address = "0.6"
 rand = "0.8"
+rcgen = "0.13"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "fs", "io-util"] }
 
@@ -27,3 +31,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time",
 enigo = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 screenshots = "0.8"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory"
+] }

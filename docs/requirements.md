@@ -1,6 +1,6 @@
 # RemoteCanvas requirements
 
-Status: working MVP 0.3
+Status: working MVP 0.4
 
 ## Implemented
 
@@ -10,8 +10,9 @@ Status: working MVP 0.3
 - Native iOS file browsing, download/preview, and non-overwriting upload for
   five allowlisted Windows user folders.
 - Tailscale-first remote connectivity without a RemoteCanvas-operated server.
-- Random 192-bit access key, Authorization-header authentication, ThisDeviceOnly
-  Keychain storage, and owner authentication before connection.
+- TLS with certificate pinning, per-device keys, DPAPI host storage, replay
+  protection, session logs, LAN-first routing, and owner authentication before
+  connection.
 - Responsive compact and regular-width layouts.
 - QR pairing and a five-minute, six-digit fallback code with attempt limiting.
 - In-app update links and tagged private GitHub releases for Windows installers.

@@ -5,24 +5,20 @@
 ```text
 iPhone / iPad                       Windows PC
 -----------------                   ------------------------
-SwiftUI live canvas  <--- JPEG ---- Axum WebSocket :47831
+SwiftUI live canvas  <--- JPEG ---- Axum WSS :47831
 touch/text/scroll    ---- JSON ---> screenshots + enigo
-native file browser <--- HTTP ----> allowlisted user folders
-Keychain + Face ID                  192-bit persisted key
-          \________ Tailscale WireGuard tunnel ________/
+native file browser <--- HTTPS ---> allowlisted user folders
+Keychain + Face ID                  per-device key + pinned TLS
+     \__ LAN first, Tailscale fallback, both over TLS __/
 ```
 
 The Windows UI is Tauri, but capture and input run in Rust rather than the web
-view. Every WebSocket and file request requires the same high-entropy key. The
-key travels in an Authorization header, not the URL. iOS stores paired records
-in a ThisDeviceOnly Keychain item and requests owner authentication before a
-session opens.
-
-Tailscale supplies authenticated device membership, NAT traversal, and
-transport encryption. RemoteCanvas itself has no hosted control or data plane.
-Tailscale can use its encrypted DERP infrastructure when peers cannot establish
-a direct path, so the connection is not guaranteed to be physically P2P in all
-network conditions.
+view. Every WebSocket and file request requires a device-specific key, a
+timestamp, and a one-time nonce. The key travels in an Authorization header,
+not the URL. iOS stores paired records in a ThisDeviceOnly Keychain item,
+pins the host certificate, and requests owner authentication before a session
+opens. At home the client probes the LAN address first and uses a higher
+frame rate when that path is up.
 
 ## Adaptive presentation
 
@@ -40,10 +36,8 @@ cannot be reliably reconstructed.
 ## Next production architecture
 
 - Replace JPEG frames with hardware H.264/HEVC and adaptive bitrate.
-- Give every client its own public/private identity and revocation record.
-- Use a short-lived pairing ceremony instead of revealing the persistent host
-  key.
-- Add replay-resistant session handshakes and key rotation.
+- Give every client its own public/private identity beyond the current
+  per-device bearer token.
 - Run capture in a least-privilege Windows service with explicit consent and
   auditable session events.
 - Add UI Automation metadata, clipboard policy, audio, and multi-monitor

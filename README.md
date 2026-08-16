@@ -1,7 +1,7 @@
 # RemoteCanvas
 
 RemoteCanvas is an iPhone/iPad-first remote client for a Windows PC. Version
-0.3 is a working MVP: the Windows host captures its primary display, streams
+0.4 is a working MVP: the Windows host captures its primary display, streams
 JPEG frames to iOS, accepts pointer/text/scroll input, and exposes selected user
 folders through an authenticated file API.
 
@@ -13,13 +13,13 @@ folders through an authenticated file API.
 - Download and Quick Look preview of supported images, videos, audio, PDFs, and
   documents.
 - Upload from the iOS Files picker without overwriting an existing file.
-- 192-bit random host access key, Bearer authentication, iOS Keychain storage,
-  and Face ID/Touch ID/device-passcode approval before connection.
-- QR pairing or a five-minute, six-digit one-time code. The 192-bit key is never
+- TLS with a host certificate pinned during pairing, per-device keys, DPAPI
+  storage on Windows, replay-protected requests, and Face ID before connect.
+- QR pairing or a five-minute, six-digit one-time code. Device keys are never
   shown or typed by the user.
-- Remote access through Tailscale. RemoteCanvas itself needs no hosted server;
-  Tailscale normally connects peers directly with WireGuard and may use its own
-  encrypted relay when direct NAT traversal is impossible.
+- At home the iPhone uses the LAN first for lower latency and a higher frame
+  rate. Away from home it falls back to Tailscale. RemoteCanvas itself needs no
+  hosted server.
 
 ## Connect a Windows PC
 
@@ -27,17 +27,15 @@ folders through an authenticated file API.
    tailnet.
 2. Install and open **RemoteCanvas Host** on Windows. Allow its Windows Firewall
    prompt for the network profiles you intend to use.
-3. Select **端末を追加**. When Tailscale is running, RemoteCanvas prefers its
+3. Select **Add device**. When Tailscale is running, RemoteCanvas prefers its
    `100.64.0.0/10` address.
-4. On iPhone/iPad, choose **PCを追加** and scan the QR code. Manual setup uses
+4. On iPhone/iPad, tap **+** and scan the QR code. Manual setup uses
    the displayed endpoint and six-digit code; the code expires after five
    minutes and locks after five failed attempts.
 5. Approve Face ID/Touch ID/device passcode, then connect.
 
-An `http://100.x.x.x:47831` endpoint is still encrypted by the surrounding
-Tailscale WireGuard tunnel. A normal LAN `http://192.168.x.x:47831` endpoint is
-not transport-encrypted by RemoteCanvas and should only be used on a trusted
-private network.
+Both LAN and Tailscale endpoints are `https://…:47831`. After **Rotate keys**
+on Windows, phones must pair again.
 
 ## Build iOS
 

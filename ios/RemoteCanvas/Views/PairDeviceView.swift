@@ -5,7 +5,7 @@ struct PairDeviceView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @State private var computerName = "Windows PC"
-    @State private var endpoint = "http://"
+    @State private var endpoint = "https://"
     @State private var pairingCode = ""
     @State private var errorMessage: String?
     @State private var isPairing = false
@@ -19,23 +19,20 @@ struct PairDeviceView: View {
                     Button {
                         presentedSheet = .qrScanner
                     } label: {
-                        Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Label("Scan QR", systemImage: "qrcode.viewfinder")
                     }
                     .disabled(!DataScannerViewController.isSupported || !DataScannerViewController.isAvailable)
-                } footer: {
-                    Text("Windows版で「端末を追加」を押して表示されたQRコードを読み取ります。")
                 }
 
-                Section("6桁コードで追加") {
-                    TextField("PC名", text: $computerName)
+                Section {
+                    TextField("Name", text: $computerName)
                         .focused($focusedField, equals: .name)
-                    TextField("接続先（例: http://100.x.x.x:47831）", text: $endpoint)
+                    TextField("https://192.168.x.x:47831", text: $endpoint)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .focused($focusedField, equals: .endpoint)
-                    TextField("6桁コード", text: $pairingCode)
+                    TextField("Code", text: $pairingCode)
                         .keyboardType(.numberPad)
                         .textContentType(.oneTimeCode)
                         .font(.title2.monospacedDigit().weight(.semibold))
@@ -47,28 +44,24 @@ struct PairDeviceView: View {
 
                 if let errorMessage {
                     Section {
-                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        Text(errorMessage)
                             .foregroundStyle(.red)
                     }
                 }
-
-                Section {} footer: {
-                    Text("外出先から接続する場合は、両方の端末を同じTailscaleネットワークへ登録し、Windows側の100.xアドレスを入力します。")
-                }
             }
-            .navigationTitle("PCをペアリング")
+            .navigationTitle("Add PC")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("キャンセル") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isPairing ? "登録中…" : "登録") {
+                    Button(isPairing ? "Adding…" : "Add") {
                         Task { await register() }
                     }
-                        .fontWeight(.semibold)
-                        .disabled(endpoint.isEmpty || pairingCode.count != 6 || isPairing)
-                        .accessibilityIdentifier("confirm-pairing")
+                    .fontWeight(.semibold)
+                    .disabled(endpoint.isEmpty || pairingCode.count != 6 || isPairing)
+                    .accessibilityIdentifier("confirm-pairing")
                 }
             }
             .sheet(item: $presentedSheet) { sheet in
@@ -84,7 +77,7 @@ struct PairDeviceView: View {
 
     private func register() async {
         guard pairingCode.count == 6 else {
-            errorMessage = "Windowsに表示された6桁コードを入力してください。"
+            errorMessage = "Enter the 6-digit code from Windows."
             return
         }
         isPairing = true
@@ -92,11 +85,39 @@ struct PairDeviceView: View {
         defer { isPairing = false }
 
         do {
-            let accessToken = try await LiveRemoteSession.exchangePairingCode(
-                endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
-                code: pairingCode
+            let result = try await LiveRemoteSession.exchangePairingCode(
+                endpoints: [endpoint.trimmingCharacters(in: .whitespacesAndNewlines)],
+                code: pairingCode,
+                certSha256: nil
             )
-            try appModel.registerDevice(name: computerName, endpoint: endpoint, accessToken: accessToken)
+            try appModel.registerDevice(
+                name: computerName,
+                endpoints: result.endpoints,
+                accessToken: result.accessToken,
+                certSha256: result.certSha256
+            )
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func registerScanned(_ pairing: PairingQRCode) async {
+        isPairing = true
+        errorMessage = nil
+        defer { isPairing = false }
+        do {
+            let result = try await LiveRemoteSession.exchangePairingCode(
+                endpoints: pairing.resolvedEndpoints,
+                code: pairing.code,
+                certSha256: pairing.certSha256
+            )
+            try appModel.registerDevice(
+                name: pairing.name,
+                endpoints: result.endpoints,
+                accessToken: result.accessToken,
+                certSha256: result.certSha256
+            )
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -106,15 +127,15 @@ struct PairDeviceView: View {
     private func handleScannedPayload(_ payload: String) {
         guard let data = payload.data(using: .utf8),
               let pairing = try? JSONDecoder().decode(PairingQRCode.self, from: data),
-              pairing.version == 1 else {
-            errorMessage = "RemoteCanvasのQRコードではありません。"
+              pairing.version == 1 || pairing.version == 2 else {
+            errorMessage = "Not a RemoteCanvas QR code."
             return
         }
         computerName = pairing.name
-        endpoint = pairing.endpoint
+        endpoint = pairing.resolvedEndpoints.first ?? pairing.endpoint ?? endpoint
         pairingCode = pairing.code
         presentedSheet = nil
-        Task { await register() }
+        Task { await registerScanned(pairing) }
     }
 }
 
@@ -134,8 +155,16 @@ private extension PairDeviceView {
 private struct PairingQRCode: Decodable {
     let version: Int
     let name: String
-    let endpoint: String
     let code: String
+    let certSha256: String?
+    let endpoint: String?
+    let endpoints: [String]?
+
+    var resolvedEndpoints: [String] {
+        if let endpoints, !endpoints.isEmpty { return endpoints }
+        if let endpoint { return [endpoint] }
+        return []
+    }
 }
 
 private struct QRScannerSheet: View {
@@ -151,16 +180,15 @@ private struct QRScannerSheet: View {
                 }
                 .ignoresSafeArea()
 
-                RoundedRectangle(cornerRadius: 22)
-                    .stroke(.white, lineWidth: 3)
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.white, lineWidth: 2)
                     .frame(width: 240, height: 240)
-                    .shadow(color: .black.opacity(0.4), radius: 8)
             }
-            .navigationTitle("QRコードを読み取る")
+            .navigationTitle("Scan")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }
+                    Button("Close") { dismiss() }
                 }
             }
         }

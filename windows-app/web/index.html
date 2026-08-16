@@ -1,104 +1,34 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RemoteCanvas Host</title>
+    <title>RemoteCanvas</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="app.js" defer></script>
   </head>
   <body>
-    <div class="shell">
-      <aside>
-        <div class="brand-mark" aria-hidden="true">RC</div>
+    <main>
+      <header>
         <div>
-          <strong>RemoteCanvas</strong>
-          <span>Windows Host</span>
+          <h1 id="host-name">PC</h1>
+          <p id="endpoint">…</p>
         </div>
-        <nav aria-label="設定カテゴリー">
-          <button class="nav-item active">概要</button>
-          <button class="nav-item">端末</button>
-          <button class="nav-item">セキュリティ</button>
-        </nav>
-        <div class="sidebar-footer">
-          <div class="version">v<span id="version">0.3.0</span></div>
-          <button class="update-button" id="update-button">アップデートを確認</button>
-        </div>
-      </aside>
+        <span class="status" id="service-state">Live</span>
+      </header>
 
-      <main>
-        <header>
-          <div>
-            <p class="eyebrow">WINDOWS HOST</p>
-            <h1>このPCへ安全に接続</h1>
-            <p class="subtitle">Tailscaleと接続キーで保護されたiPhone・iPadから接続します。</p>
-          </div>
-          <div class="status-pill"><i></i><span id="service-state">準備完了</span></div>
-        </header>
+      <button class="primary" id="pair-button">Add device</button>
+      <button class="ghost" id="update-button">Update</button>
+      <button class="ghost" id="rotate-button">Rotate keys</button>
 
-        <section class="hero-card">
-          <div class="computer-icon" aria-hidden="true">
-            <div class="screen"><span></span></div>
-            <div class="stand"></div>
-          </div>
-          <div class="hero-copy">
-            <span class="label">PC名</span>
-            <h2 id="host-name">Home PC</h2>
-            <p id="endpoint">接続アドレスを取得中…</p>
-          </div>
-          <button class="primary" id="pair-button">端末を追加</button>
-        </section>
+      <section class="pairing hidden" id="pairing-card" aria-live="polite">
+        <div class="qr" id="pairing-qr" aria-label="Pairing QR code"></div>
+        <p class="code" id="pairing-code">------</p>
+        <p class="meta"><span id="pairing-expiry">5 min</span> · <code id="pairing-endpoint">—</code></p>
+        <button class="ghost" id="close-pairing">Done</button>
+      </section>
 
-        <div class="grid">
-          <section class="card">
-            <div class="card-heading">
-              <div class="icon shield">✓</div>
-              <div>
-                <h3>アクセス認証</h3>
-                <p>一時コードで安全に端末登録</p>
-              </div>
-            </div>
-            <dl>
-              <div><dt>接続キー</dt><dd id="access-key-status">確認中</dd></div>
-              <div><dt>外部ネットワーク</dt><dd>Tailscale端末認証</dd></div>
-              <div><dt>プロトコル</dt><dd>remote-canvas/1</dd></div>
-            </dl>
-          </section>
-
-          <section class="card">
-            <div class="card-heading">
-              <div class="icon network">↗</div>
-              <div>
-                <h3>接続経路</h3>
-                <p>Tailscale / LANで直接接続</p>
-              </div>
-            </div>
-            <div class="route">
-              <span>iPhone / iPad</span>
-              <div class="route-line"><i></i></div>
-              <span>このPC</span>
-            </div>
-            <p class="footnote" id="transport">画面配信サービスを起動中</p>
-          </section>
-        </div>
-
-        <section class="pairing-card hidden" id="pairing-card" aria-live="polite">
-          <div class="pairing-qr" id="pairing-qr" aria-label="端末追加QRコード"></div>
-          <div class="pairing-copy">
-            <p class="eyebrow">端末を追加</p>
-            <h2 id="pairing-code">------</h2>
-            <p>iPhone/iPadでQRを読み取るか、6桁コードを入力してください。</p>
-            <p class="pairing-expiry">コードは<span id="pairing-expiry">5分</span>で期限切れになります。</p>
-            <details>
-              <summary>手動入力用の接続先</summary>
-              <code id="pairing-endpoint">---</code>
-            </details>
-          </div>
-          <button class="secondary" id="close-pairing">閉じる</button>
-        </section>
-
-        <p class="error hidden" id="error-message"></p>
-      </main>
-    </div>
+      <p class="error hidden" id="error-message"></p>
+    </main>
   </body>
 </html>
