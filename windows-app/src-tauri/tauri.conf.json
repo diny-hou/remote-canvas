@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RemoteCanvas Host",
-  "version": "0.4.3",
+  "version": "0.4.4",
+  "mainBinaryName": "RemoteCanvas Host",
   "identifier": "jp.remote-canvas.host",
   "build": {
     "frontendDist": "../web"
@@ -48,7 +49,8 @@
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false,
-        "languages": ["English"]
+        "languages": ["English"],
+        "installerHooks": "./windows/hooks.nsh"
       }
     }
   }

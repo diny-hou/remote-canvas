@@ -137,20 +137,39 @@ fn temp_dir() -> PathBuf {
 fn launch_installer_and_relaunch(installer: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let app = std::env::var("LOCALAPPDATA")
+        use std::os::windows::process::CommandExt;
+
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let local_app = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join("RemoteCanvas Host")
-            .join("RemoteCanvas Host.exe");
+            .join("RemoteCanvas Host");
+        let current = std::env::current_exe().unwrap_or_else(|_| {
+            local_app.join("RemoteCanvas Host.exe")
+        });
         let script = temp_dir().join("RemoteCanvas-update.cmd");
         let contents = format!(
-            "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nstart /wait \"\" \"{}\" /S\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
-            installer.display(),
-            app.display()
+            "@echo off\r\n\
+             timeout /t 3 /nobreak >nul\r\n\
+             start /wait \"\" \"{installer}\" /S\r\n\
+             if exist \"{current}\" (\r\n\
+             start \"\" \"{current}\"\r\n\
+             ) else if exist \"%LOCALAPPDATA%\\RemoteCanvas Host\\RemoteCanvas Host.exe\" (\r\n\
+             start \"\" \"%LOCALAPPDATA%\\RemoteCanvas Host\\RemoteCanvas Host.exe\"\r\n\
+             ) else if exist \"%LOCALAPPDATA%\\RemoteCanvas Host\\remote-canvas-host.exe\" (\r\n\
+             start \"\" \"%LOCALAPPDATA%\\RemoteCanvas Host\\remote-canvas-host.exe\"\r\n\
+             )\r\n\
+             del \"%~f0\"\r\n",
+            installer = installer.display(),
+            current = current.display()
         );
         fs::write(&script, contents).map_err(|error| error.to_string())?;
         std::process::Command::new("cmd")
-            .args(["/C", &script.display().to_string()])
+            .args(["/C", "call", &script.display().to_string()])
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| error.to_string())?;
         Ok(())
