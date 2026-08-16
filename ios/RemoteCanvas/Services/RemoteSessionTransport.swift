@@ -274,8 +274,12 @@ final class LiveRemoteSession: RemoteSessionTransport {
     func download(_ file: RemoteFileEntry) async throws -> URL {
         var request = try apiRequest(path: "/api/file", queryItems: [URLQueryItem(name: "path", value: file.path)])
         request.httpMethod = "GET"
+        request.timeoutInterval = 6 * 60 * 60
         let (temporaryURL, response) = try await session.download(for: request)
-        try validate(response: response, data: Data())
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let details = (try? Data(contentsOf: temporaryURL)) ?? Data()
+            try validate(response: response, data: details)
+        }
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent(file.name)

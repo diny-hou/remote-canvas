@@ -1,6 +1,5 @@
 import LocalAuthentication
 import SwiftUI
-import QuickLook
 import UniformTypeIdentifiers
 
 struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
@@ -298,7 +297,9 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     @State private var history: [String] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var previewURL: URL?
+    @State private var preview: FilePreviewItem?
+    @State private var previewCleanup: URL?
+    @State private var downloadLabel: String?
     @State private var isImporterPresented = false
     @State private var isContentConcealed = false
     @State private var isScreenCaptured = UIScreen.main.isCaptured
@@ -381,13 +382,23 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
                     }
                 }
             }
-            .sheet(isPresented: Binding(
-                get: { previewURL != nil },
-                set: { if !$0 { previewURL = nil } }
-            )) {
-                if let previewURL {
-                    QuickLookPreview(url: previewURL)
-                        .ignoresSafeArea()
+            .overlay {
+                if isLoading && !entries.isEmpty {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        if let downloadLabel {
+                            Text(downloadLabel)
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .padding(16)
+                    .background(.black.opacity(0.55), in: Capsule())
+                }
+            }
+            .fullScreenCover(item: $preview, onDismiss: cleanupPreview) { item in
+                FilePreviewContainer(item: item) {
+                    preview = nil
                 }
             }
             .overlay {
@@ -413,15 +424,63 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
             Task { await load(path: entry.path) }
         } else {
             isLoading = true
+            downloadLabel = "Opening \(entry.name)"
             Task {
                 do {
-                    previewURL = try await transport.download(entry)
+                    let item = try await makePreview(for: entry)
+                    preview = item
                 } catch {
                     errorMessage = error.localizedDescription
                 }
+                downloadLabel = nil
                 isLoading = false
             }
         }
+    }
+
+    private func makePreview(for entry: RemoteFileEntry) async throws -> FilePreviewItem {
+        let url = try await transport.download(entry)
+        previewCleanup = url.deletingLastPathComponent()
+        switch FileKind(url: url) {
+        case .archive:
+            let folder = url.deletingLastPathComponent().appendingPathComponent("extracted", isDirectory: true)
+            do {
+                let files = try ZipArchive.extract(from: url, to: folder)
+                let pages = ZipArchive.imagePages(in: files)
+                if !pages.isEmpty {
+                    return .comic(title: entry.name, pages: pages, startIndex: 0)
+                }
+                if files.count == 1, let first = files.first {
+                    return mediaOrDocument(first)
+                }
+                if !files.isEmpty {
+                    return .archive(title: entry.name, files: files)
+                }
+            } catch {
+                return .document(url)
+            }
+            return .document(url)
+        case .image:
+            return .comic(title: entry.name, pages: [url], startIndex: 0)
+        case .video, .audio:
+            return .media(url)
+        default:
+            return mediaOrDocument(url)
+        }
+    }
+
+    private func mediaOrDocument(_ url: URL) -> FilePreviewItem {
+        switch FileKind(url: url) {
+        case .video, .audio: .media(url)
+        default: .document(url)
+        }
+    }
+
+    private func cleanupPreview() {
+        if let previewCleanup {
+            try? FileManager.default.removeItem(at: previewCleanup)
+        }
+        previewCleanup = nil
     }
 
     private func load(path: String) async {
@@ -442,34 +501,6 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     }
 
     private func icon(for name: String) -> String {
-        let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
-        if ["jpg", "jpeg", "png", "gif", "heic", "webp"].contains(ext) { return "photo" }
-        if ["mp4", "mov", "mkv", "avi", "webm"].contains(ext) { return "play.rectangle" }
-        if ["mp3", "m4a", "wav", "flac"].contains(ext) { return "waveform" }
-        if ext == "pdf" { return "doc.richtext" }
-        return "doc"
-    }
-}
-
-private struct QuickLookPreview: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeCoordinator() -> Coordinator { Coordinator(url: url) }
-
-    func makeUIViewController(context: Context) -> QLPreviewController {
-        let controller = QLPreviewController()
-        controller.dataSource = context.coordinator
-        return controller
-    }
-
-    func updateUIViewController(_ uiViewController: QLPreviewController, context: Context) {}
-
-    final class Coordinator: NSObject, QLPreviewControllerDataSource {
-        let url: URL
-        init(url: URL) { self.url = url }
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
-        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
-            url as NSURL
-        }
+        FileKind(fileName: name).symbolName
     }
 }

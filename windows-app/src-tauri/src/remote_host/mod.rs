@@ -24,7 +24,8 @@ use std::{
 use store::{append_session_log, now_unix, DeviceRecord, PersistedState};
 
 pub const HOST_PORT: u16 = 47_831;
-const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const PAIRING_TTL_SECONDS: u64 = 5 * 60;
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const REPLAY_WINDOW_SECS: i64 = 90;
@@ -490,7 +491,7 @@ pub fn start(state: RemoteHostState) {
             .route("/ws", get(websocket_upgrade))
             .route("/api/files", get(list_files))
             .route("/api/file", get(download_file).put(upload_file))
-            .layer(DefaultBodyLimit::max(MAX_FILE_BYTES as usize))
+            .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES as usize))
             .with_state(state);
 
         let addr = SocketAddr::from(([0, 0, 0, 0], HOST_PORT));
@@ -706,35 +707,134 @@ async fn download_file(
         Ok(path) if path.is_file() => path,
         _ => return (StatusCode::NOT_FOUND, "File not found").into_response(),
     };
-    if path
-        .metadata()
-        .map(|metadata| metadata.len())
-        .unwrap_or(u64::MAX)
-        > MAX_FILE_BYTES
-    {
+    let file_len = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if file_len > MAX_FILE_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Files larger than 512 MiB are not supported",
+            "Files larger than 8 GiB are not supported",
         )
             .into_response();
     }
 
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => {
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("download.bin");
-            Response::builder()
-                .header(header::CONTENT_TYPE, "application/octet-stream")
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download.bin");
+    let (start, end, status) = match parse_byte_range(headers.get(header::RANGE), file_len) {
+        Ok(range) => range,
+        Err(()) => {
+            return (StatusCode::RANGE_NOT_SATISFIABLE, "Invalid range").into_response();
+        }
+    };
+    let length = end.saturating_sub(start) + 1;
+    match stream_file_range(path.clone(), start, length).await {
+        Ok(body) => {
+            let mut builder = Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, content_type_for(&path))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CONTENT_LENGTH, length)
                 .header(
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}\"", file_name.replace('"', "")),
-                )
-                .body(Body::from(bytes))
+                    format!(
+                        "inline; filename=\"{}\"",
+                        file_name.replace('"', "")
+                    ),
+                );
+            if status == StatusCode::PARTIAL_CONTENT {
+                builder = builder.header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{file_len}"),
+                );
+            }
+            builder
+                .body(body)
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
+}
+
+fn parse_byte_range(
+    header: Option<&axum::http::HeaderValue>,
+    file_len: u64,
+) -> Result<(u64, u64, StatusCode), ()> {
+    let Some(value) = header.and_then(|value| value.to_str().ok()) else {
+        return Ok((0, file_len.saturating_sub(1), StatusCode::OK));
+    };
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    if file_len == 0 {
+        return Ok((0, 0, StatusCode::OK));
+    }
+    let last = file_len - 1;
+    let (start, end) = if let Some(suffix) = range.strip_prefix('-') {
+        let suffix: u64 = suffix.parse().map_err(|_| ())?;
+        (file_len.saturating_sub(suffix), last)
+    } else if let Some(start_raw) = range.strip_suffix('-') {
+        (start_raw.parse().map_err(|_| ())?, last)
+    } else {
+        let (start_raw, end_raw) = range.split_once('-').ok_or(())?;
+        (
+            start_raw.parse().map_err(|_| ())?,
+            end_raw.parse::<u64>().map_err(|_| ())?.min(last),
+        )
+    };
+    if start > end || start >= file_len {
+        return Err(());
+    }
+    Ok((start, end, StatusCode::PARTIAL_CONTENT))
+}
+
+async fn stream_file_range(path: PathBuf, start: u64, length: u64) -> Result<Body, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use tokio_util::io::ReaderStream;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|error| error.to_string())?;
+    let limited = file.take(length);
+    Ok(Body::from_stream(ReaderStream::new(limited)))
+}
+
+fn content_type_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" | "heif" => "image/heic",
+        "bmp" => "image/bmp",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        "ts" | "m2ts" | "mts" => "video/mp2t",
+        "mpeg" | "mpg" | "mpe" => "video/mpeg",
+        "3gp" => "video/3gpp",
+        "ogv" => "video/ogg",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wma" => "audio/x-ms-wma",
+        "pdf" => "application/pdf",
+        "zip" | "cbz" => "application/zip",
+        "txt" | "log" | "md" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        _ => "application/octet-stream",
     }
 }
 

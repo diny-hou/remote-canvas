@@ -18,6 +18,9 @@
 		100000000000000000000009 /* RemoteSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* RemoteSessionView.swift */; };
 		10000000000000000000000A /* RemoteWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* RemoteWorkspaceView.swift */; };
 		10000000000000000000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* Assets.xcassets */; };
+		10000000000000000000000D /* FilePreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* FilePreviewSupport.swift */; };
+		10000000000000000000000E /* FilePreviewViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* FilePreviewViews.swift */; };
+		10000000000000000000000F /* MobileVLCKit in Frameworks */ = {isa = PBXBuildFile; productRef = P00000000000000000000002 /* MobileVLCKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +36,8 @@
 		20000000000000000000000A /* RemoteWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWorkspaceView.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		20000000000000000000000C /* RemoteCanvas.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteCanvas.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000000D /* FilePreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewSupport.swift; sourceTree = "<group>"; };
+		20000000000000000000000E /* FilePreviewViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -40,7 +45,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				10000000000000000000000B /* Assets.xcassets in Resources */,
+				10000000000000000000000F /* MobileVLCKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -80,6 +85,7 @@
 			children = (
 				200000000000000000000003 /* AppModel.swift */,
 				200000000000000000000004 /* RemoteSessionTransport.swift */,
+				20000000000000000000000D /* FilePreviewSupport.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -92,6 +98,7 @@
 				200000000000000000000007 /* PairDeviceView.swift */,
 				200000000000000000000008 /* SecuritySettingsView.swift */,
 				200000000000000000000009 /* RemoteSessionView.swift */,
+				20000000000000000000000E /* FilePreviewViews.swift */,
 				400000000000000000000006 /* Components */,
 			);
 			path = Views;
@@ -129,6 +136,9 @@
 			dependencies = (
 			);
 			name = RemoteCanvas;
+			packageProductDependencies = (
+				P00000000000000000000002 /* MobileVLCKit */,
+			);
 			productName = RemoteCanvas;
 			productReference = 20000000000000000000000C /* RemoteCanvas.app */;
 			productType = "com.apple.product-type.application";
@@ -157,6 +167,9 @@
 				Base,
 			);
 			mainGroup = 400000000000000000000001;
+			packageReferences = (
+				P00000000000000000000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */,
+			);
 			productRefGroup = 400000000000000000000007 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -171,6 +184,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				10000000000000000000000B /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -191,6 +205,8 @@
 				100000000000000000000008 /* SecuritySettingsView.swift in Sources */,
 				100000000000000000000009 /* RemoteSessionView.swift in Sources */,
 				10000000000000000000000A /* RemoteWorkspaceView.swift in Sources */,
+				10000000000000000000000D /* FilePreviewSupport.swift in Sources */,
+				10000000000000000000000E /* FilePreviewViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -237,7 +253,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 9W45783256;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemoteCanvas/Info.plist;
@@ -249,7 +265,11 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.4.8;
+				MARKETING_VERSION = 0.4.9;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = jp.remote-canvas.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -267,7 +287,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 9W45783256;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemoteCanvas/Info.plist;
@@ -279,7 +299,11 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.4.8;
+				MARKETING_VERSION = 0.4.9;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = jp.remote-canvas.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -313,6 +337,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		P00000000000000000000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MobileVLCKit-SPM/MobileVLCKit-SPM-Lite";
+			requirement = {
+				kind = exactVersion;
+				version = 3.7.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		P00000000000000000000002 /* MobileVLCKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = P00000000000000000000001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM-Lite" */;
+			productName = MobileVLCKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 600000000000000000000001 /* Project object */;
 }

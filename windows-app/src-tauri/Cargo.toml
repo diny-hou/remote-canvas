@@ -1,6 +1,6 @@
 [package]
 name = "remote-canvas-host"
-version = "0.4.8"
+version = "0.4.9"
 description = "RemoteCanvas Windows host shell"
 authors = ["RemoteCanvas"]
 edition = "2021"
@@ -27,6 +27,7 @@ serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 enigo = "0.3"
