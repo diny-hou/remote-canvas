@@ -378,15 +378,15 @@ struct StreamQuality {
 }
 
 const LAN_QUALITY: StreamQuality = StreamQuality {
-    interval_ms: 33,
-    jpeg_quality: 58,
-    max_width: 1280,
+    interval_ms: 42,
+    jpeg_quality: 85,
+    max_width: 1920,
 };
 
 const REMOTE_QUALITY: StreamQuality = StreamQuality {
     interval_ms: 50,
-    jpeg_quality: 48,
-    max_width: 960,
+    jpeg_quality: 78,
+    max_width: 1600,
 };
 
 fn stream_quality(headers: &HeaderMap, addr: SocketAddr) -> (StreamQuality, &'static str) {
@@ -459,6 +459,14 @@ enum ClientCommand {
     },
     Text {
         text: String,
+    },
+    SetStreamQuality {
+        #[serde(default)]
+        interval_ms: u64,
+        #[serde(default)]
+        jpeg_quality: u8,
+        #[serde(default)]
+        max_width: u32,
     },
 }
 
@@ -569,14 +577,15 @@ async fn websocket_upgrade(
 }
 
 async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
+    let quality = Arc::new(Mutex::new(quality));
     let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(Vec::<u8>::new());
+    let capture_quality = quality.clone();
     tokio::spawn(async move {
-        let mut frame_timer = tokio::time::interval(Duration::from_millis(quality.interval_ms));
-        frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            frame_timer.tick().await;
+            let started = Instant::now();
+            let current = *lock(&capture_quality);
             let captured = tokio::task::spawn_blocking(move || {
-                capture_primary_display(quality.max_width, quality.jpeg_quality)
+                capture_primary_display(current.max_width, current.jpeg_quality)
             })
             .await;
             match captured {
@@ -587,6 +596,10 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                 }
                 Ok(Err(_)) | Err(_) => {}
                 Ok(Ok(_)) => {}
+            }
+            let target = Duration::from_millis(current.interval_ms.max(8));
+            if let Some(wait) = target.checked_sub(started.elapsed()) {
+                tokio::time::sleep(wait).await;
             }
         }
     });
@@ -617,7 +630,17 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(command) = serde_json::from_str::<ClientCommand>(&text) {
-                            apply_input(command);
+                            if let ClientCommand::SetStreamQuality {
+                                interval_ms,
+                                jpeg_quality,
+                                max_width,
+                            } = command
+                            {
+                                let mut current = lock(&quality);
+                                *current = merge_stream_quality(*current, interval_ms, jpeg_quality, max_width);
+                            } else {
+                                apply_input(command);
+                            }
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
@@ -626,6 +649,31 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                 }
             }
         }
+    }
+}
+
+fn merge_stream_quality(
+    current: StreamQuality,
+    interval_ms: u64,
+    jpeg_quality: u8,
+    max_width: u32,
+) -> StreamQuality {
+    StreamQuality {
+        interval_ms: if interval_ms == 0 {
+            current.interval_ms
+        } else {
+            interval_ms.clamp(8, 200)
+        },
+        jpeg_quality: if jpeg_quality == 0 {
+            current.jpeg_quality
+        } else {
+            jpeg_quality.clamp(35, 95)
+        },
+        max_width: if max_width == 0 {
+            current.max_width
+        } else {
+            max_width.clamp(640, 3840)
+        },
     }
 }
 
@@ -1001,6 +1049,7 @@ fn apply_input(command: ClientCommand) {
             }
         }
         ClientCommand::Text { text } => type_text(&text),
+        ClientCommand::SetStreamQuality { .. } => {}
     }
 }
 
@@ -1093,6 +1142,7 @@ fn apply_input(command: ClientCommand) {
         ClientCommand::Text { text } => {
             let _ = text;
         }
+        ClientCommand::SetStreamQuality { .. } => {}
     }
 }
 

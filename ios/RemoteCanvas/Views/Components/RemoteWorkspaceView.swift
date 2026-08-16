@@ -56,6 +56,8 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
     private var twoFingerStartMid = CGPoint.zero
     private var twoFingerLastMid = CGPoint.zero
     private var twoFingerStartDistance: CGFloat = 1
+    private var fingerStarts: [CGPoint] = []
+    private var fingerLasts: [CGPoint] = []
     private var scrollAnchor = CGPoint.zero
     private var protectFromCapture = false
     private var decodeGeneration = 0
@@ -91,6 +93,9 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         touchLayer.isMultipleTouchEnabled = true
         touchLayer.onTouchesBegan = { [weak self] in
             self?.didSecondaryClick = false
+        }
+        touchLayer.onSecondFinger = { [weak self] in
+            self?.cancelOneFingerDragForScroll()
         }
 
         pointerView.image = Self.cursorImage
@@ -195,7 +200,10 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
             return scrollView.zoomScale > 1.02
         }
         if gestureRecognizer === oneFingerDrag {
-            return !suppressDragUntilLift
+            return !suppressDragUntilLift && !twoFingerActive
+        }
+        if gestureRecognizer === pinch {
+            return twoFingerIntent != .scroll
         }
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
@@ -312,12 +320,13 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
 
     private func handleTwoFingerGesture(_ gesture: UIGestureRecognizer, desiredZoom: CGFloat) {
         let mid = touchMidpoint(gesture)
+        let fingers = touchPoints(gesture)
         switch gesture.state {
         case .began:
             beginTwoFinger(at: mid, distance: touchDistance(gesture))
-            updateTwoFinger(desiredZoom: desiredZoom, mid: mid)
+            updateTwoFinger(desiredZoom: desiredZoom, mid: mid, fingers: fingers)
         case .changed:
-            updateTwoFinger(desiredZoom: desiredZoom, mid: mid)
+            updateTwoFinger(desiredZoom: desiredZoom, mid: mid, fingers: fingers)
         case .ended, .cancelled, .failed:
             finishTwoFinger(desiredZoom: desiredZoom, mid: mid)
         default:
@@ -327,6 +336,7 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
 
     private func beginTwoFinger(at mid: CGPoint, distance: CGFloat) {
         guard !twoFingerActive else { return }
+        cancelOneFingerDragForScroll()
         twoFingerActive = true
         twoFingerIntent = .undecided
         pinchStart = scrollView.zoomScale
@@ -334,32 +344,32 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         twoFingerStartMid = mid
         twoFingerLastMid = mid
         twoFingerStartDistance = max(distance, 1)
+        fingerStarts = []
+        fingerLasts = []
         scrollAnchor = mid
         scrollRemainder = .zero
     }
 
-    private func updateTwoFinger(desiredZoom: CGFloat, mid: CGPoint) {
+    private func updateTwoFinger(desiredZoom: CGFloat, mid: CGPoint, fingers: [CGPoint] = []) {
         guard twoFingerActive else {
             beginTwoFinger(at: mid, distance: twoFingerStartDistance)
             return
         }
-        let factor = desiredZoom / max(pinchStart, 0.001)
-        let translation = CGPoint(x: mid.x - twoFingerStartMid.x, y: mid.y - twoFingerStartMid.y)
-        resolveTwoFingerIntent(scaleFactor: factor, translation: translation)
+        let tracked = trackedFingers(from: fingers)
+        resolveTwoFingerIntent(desiredZoom: desiredZoom, mid: mid, fingers: tracked)
         switch twoFingerIntent {
         case .undecided:
             twoFingerLastMid = mid
+            fingerLasts = tracked
         case .zoom:
             applyPinch(scale: desiredZoom, fingerInView: mid, settle: false)
             twoFingerLastMid = mid
+            fingerLasts = tracked
         case .scroll:
-            let delta = CGPoint(x: mid.x - twoFingerLastMid.x, y: mid.y - twoFingerLastMid.y)
+            let delta = scrollDelta(mid: mid, fingers: tracked)
             twoFingerLastMid = mid
-            if scrollView.zoomScale > 1.05 {
-                panZoomedView(by: delta)
-            } else {
-                applyRemoteScroll(delta)
-            }
+            fingerLasts = tracked
+            applyRemoteScroll(delta)
         }
     }
 
@@ -372,21 +382,95 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         }
         twoFingerActive = false
         twoFingerIntent = .undecided
+        fingerStarts = []
+        fingerLasts = []
         scrollRemainder = .zero
     }
 
-    private func resolveTwoFingerIntent(scaleFactor: CGFloat, translation: CGPoint) {
+    private func resolveTwoFingerIntent(desiredZoom: CGFloat, mid: CGPoint, fingers: [CGPoint]) {
+        if twoFingerIntent == .scroll { return }
+        let analysis = fingerMotion(fingers)
+        if analysis.oneHeld || analysis.sameDirection {
+            lockScroll()
+            return
+        }
         guard twoFingerIntent == .undecided else { return }
-        let zoomAmount = abs(scaleFactor - 1)
-        let moveAmount = hypot(translation.x, translation.y)
-        if zoomAmount >= 0.07 {
+        let factor = desiredZoom / max(pinchStart, 0.001)
+        let zoomAmount = abs(factor - 1)
+        let midMove = hypot(mid.x - twoFingerStartMid.x, mid.y - twoFingerStartMid.y)
+        if analysis.bothMoving, zoomAmount >= 0.10, !analysis.sameDirection {
             twoFingerIntent = .zoom
-        } else if moveAmount >= 12 {
-            twoFingerIntent = .scroll
-            if scrollView.zoomScale <= 1.05 {
-                sendPointer(at: scrollAnchor, action: .move)
+        } else if zoomAmount >= 0.16, midMove < 10, !analysis.oneHeld {
+            twoFingerIntent = .zoom
+        }
+    }
+
+    private func lockScroll() {
+        guard twoFingerIntent != .scroll else { return }
+        twoFingerIntent = .scroll
+        sendPointer(at: scrollAnchor, action: .move)
+        twoFingerLastMid = twoFingerStartMid
+        if fingerLasts.count == fingerStarts.count {
+            fingerLasts = fingerStarts
+        }
+    }
+
+    private func scrollDelta(mid: CGPoint, fingers: [CGPoint]) -> CGPoint {
+        if fingers.count == 2, fingerLasts.count == 2 {
+            let move0 = hypot(fingers[0].x - fingerStarts[0].x, fingers[0].y - fingerStarts[0].y)
+            let move1 = hypot(fingers[1].x - fingerStarts[1].x, fingers[1].y - fingerStarts[1].y)
+            if move0 >= 14, move1 < 16 {
+                return CGPoint(x: fingers[0].x - fingerLasts[0].x, y: fingers[0].y - fingerLasts[0].y)
             }
-            twoFingerLastMid = twoFingerStartMid
+            if move1 >= 14, move0 < 16 {
+                return CGPoint(x: fingers[1].x - fingerLasts[1].x, y: fingers[1].y - fingerLasts[1].y)
+            }
+            if move0 >= 12, move1 >= 12 {
+                return CGPoint(
+                    x: ((fingers[0].x - fingerLasts[0].x) + (fingers[1].x - fingerLasts[1].x)) / 2,
+                    y: ((fingers[0].y - fingerLasts[0].y) + (fingers[1].y - fingerLasts[1].y)) / 2
+                )
+            }
+        }
+        return CGPoint(x: mid.x - twoFingerLastMid.x, y: mid.y - twoFingerLastMid.y)
+    }
+
+    private func trackedFingers(from current: [CGPoint]) -> [CGPoint] {
+        guard current.count == 2 else { return current }
+        if fingerStarts.isEmpty {
+            fingerStarts = current
+            fingerLasts = current
+            return current
+        }
+        let reference = fingerLasts.count == 2 ? fingerLasts : fingerStarts
+        let direct = hypot(current[0].x - reference[0].x, current[0].y - reference[0].y)
+            + hypot(current[1].x - reference[1].x, current[1].y - reference[1].y)
+        let swapped = hypot(current[0].x - reference[1].x, current[0].y - reference[1].y)
+            + hypot(current[1].x - reference[0].x, current[1].y - reference[0].y)
+        return swapped < direct ? [current[1], current[0]] : current
+    }
+
+    private func fingerMotion(_ fingers: [CGPoint]) -> (oneHeld: Bool, bothMoving: Bool, sameDirection: Bool) {
+        guard fingers.count == 2, fingerStarts.count == 2 else {
+            return (false, false, false)
+        }
+        let move0 = CGPoint(x: fingers[0].x - fingerStarts[0].x, y: fingers[0].y - fingerStarts[0].y)
+        let move1 = CGPoint(x: fingers[1].x - fingerStarts[1].x, y: fingers[1].y - fingerStarts[1].y)
+        let dist0 = hypot(move0.x, move0.y)
+        let dist1 = hypot(move1.x, move1.y)
+        let oneHeld = (dist0 < 16 && dist1 >= 14)
+            || (dist1 < 16 && dist0 >= 14)
+            || (dist1 >= 20 && dist0 < max(16, dist1 * 0.35))
+            || (dist0 >= 20 && dist1 < max(16, dist0 * 0.35))
+        let bothMoving = dist0 >= 12 && dist1 >= 12 && !oneHeld
+        let lengths = dist0 * dist1
+        let sameDirection = bothMoving && lengths > 0 && ((move0.x * move1.x + move0.y * move1.y) / lengths) > 0.35
+        return (oneHeld, bothMoving, sameDirection)
+    }
+
+    private func cancelOneFingerDragForScroll() {
+        if isDragging {
+            endDrag(at: viewPoint(for: lastPointer))
         }
     }
 
@@ -417,18 +501,24 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         }
     }
 
+    private func touchPoints(_ gesture: UIGestureRecognizer) -> [CGPoint] {
+        guard gesture.numberOfTouches >= 2 else { return [] }
+        return [
+            gesture.location(ofTouch: 0, in: self),
+            gesture.location(ofTouch: 1, in: self)
+        ]
+    }
+
     private func touchDistance(_ gesture: UIGestureRecognizer) -> CGFloat {
-        guard gesture.numberOfTouches >= 2 else { return 0 }
-        let first = gesture.location(ofTouch: 0, in: self)
-        let second = gesture.location(ofTouch: 1, in: self)
-        return hypot(first.x - second.x, first.y - second.y)
+        let points = touchPoints(gesture)
+        guard points.count == 2 else { return 0 }
+        return hypot(points[0].x - points[1].x, points[0].y - points[1].y)
     }
 
     private func touchMidpoint(_ gesture: UIGestureRecognizer) -> CGPoint {
-        guard gesture.numberOfTouches >= 2 else { return gesture.location(in: self) }
-        let first = gesture.location(ofTouch: 0, in: self)
-        let second = gesture.location(ofTouch: 1, in: self)
-        return CGPoint(x: (first.x + second.x) / 2, y: (first.y + second.y) / 2)
+        let points = touchPoints(gesture)
+        guard points.count == 2 else { return gesture.location(in: self) }
+        return CGPoint(x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2)
     }
 
     @objc private func endDragIfNeeded() {
@@ -616,9 +706,14 @@ private enum TwoFingerIntent {
 
 private final class TouchSurfaceView: UIView {
     var onTouchesBegan: (() -> Void)?
+    var onSecondFinger: (() -> Void)?
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         onTouchesBegan?()
+        let count = event?.allTouches?.count ?? touches.count
+        if count >= 2 {
+            onSecondFinger?()
+        }
         super.touchesBegan(touches, with: event)
     }
 }

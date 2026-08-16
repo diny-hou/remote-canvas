@@ -36,6 +36,16 @@ final class AppModel {
     var privacyShieldAlways: Bool {
         didSet { persist("privacyShieldAlways", privacyShieldAlways) }
     }
+    var streamPreset: StreamQualityPreset {
+        didSet { persist("streamPreset", streamPreset.rawValue) }
+    }
+    var streamQuality: StreamQualitySettings {
+        didSet {
+            persist("streamJpegQuality", streamQuality.jpegQuality)
+            persist("streamMaxWidth", streamQuality.maxWidth)
+            persist("streamFramesPerSecond", streamQuality.framesPerSecond)
+        }
+    }
 
     var usesStrongestProtection: Bool {
         requireOwnerAuthentication
@@ -51,6 +61,29 @@ final class AppModel {
         self.hideScreenWhenInactive = Self.storedFlag("hideScreenWhenInactive", default: true)
         self.privacyShieldWhenAway = Self.storedFlag("privacyShieldWhenAway", default: true)
         self.privacyShieldAlways = Self.storedFlag("privacyShieldAlways", default: false)
+        let storedPreset = StreamQualityPreset(rawValue: Self.storedString("streamPreset", default: StreamQualityPreset.balanced.rawValue)) ?? .balanced
+        self.streamPreset = storedPreset
+        if storedPreset == .custom {
+            self.streamQuality = StreamQualitySettings(
+                jpegQuality: Self.storedInt("streamJpegQuality", default: StreamQualitySettings.balanced.jpegQuality),
+                maxWidth: Self.storedInt("streamMaxWidth", default: StreamQualitySettings.balanced.maxWidth),
+                framesPerSecond: Self.storedInt("streamFramesPerSecond", default: StreamQualitySettings.balanced.framesPerSecond)
+            )
+        } else {
+            self.streamQuality = storedPreset.settings ?? .balanced
+        }
+    }
+
+    func applyStreamPreset(_ preset: StreamQualityPreset) {
+        streamPreset = preset
+        if let settings = preset.settings {
+            streamQuality = settings
+        }
+    }
+
+    func updateStreamQuality(_ quality: StreamQualitySettings) {
+        streamQuality = quality
+        streamPreset = StreamQualityPreset.matching(quality)
     }
 
     func enableStrongestProtection() {
@@ -146,11 +179,89 @@ final class AppModel {
         UserDefaults.standard.set(value, forKey: key)
     }
 
+    private func persist(_ key: String, _ value: String) {
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    private func persist(_ key: String, _ value: Int) {
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
     private static func storedFlag(_ key: String, default defaultValue: Bool) -> Bool {
         UserDefaults.standard.object(forKey: key) == nil
             ? defaultValue
             : UserDefaults.standard.bool(forKey: key)
     }
+
+    private static func storedString(_ key: String, default defaultValue: String) -> String {
+        UserDefaults.standard.string(forKey: key) ?? defaultValue
+    }
+
+    private static func storedInt(_ key: String, default defaultValue: Int) -> Int {
+        UserDefaults.standard.object(forKey: key) == nil
+            ? defaultValue
+            : UserDefaults.standard.integer(forKey: key)
+    }
+}
+
+enum StreamQualityPreset: String, CaseIterable, Identifiable {
+    case smooth
+    case balanced
+    case sharp
+    case maximum
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .smooth: "Smooth"
+        case .balanced: "Balanced"
+        case .sharp: "Sharp"
+        case .maximum: "Maximum"
+        case .custom: "Custom"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .smooth: "Faster, softer picture"
+        case .balanced: "Clear text, photos, and video"
+        case .sharp: "Higher detail, a bit heavier"
+        case .maximum: "Highest detail and resolution"
+        case .custom: "Manual quality, size, and speed"
+        }
+    }
+
+    var settings: StreamQualitySettings? {
+        switch self {
+        case .smooth: .smooth
+        case .balanced: .balanced
+        case .sharp: .sharp
+        case .maximum: .maximum
+        case .custom: nil
+        }
+    }
+
+    static func matching(_ quality: StreamQualitySettings) -> StreamQualityPreset {
+        allCases.first { $0.settings == quality } ?? .custom
+    }
+}
+
+struct StreamQualitySettings: Equatable, Sendable {
+    var jpegQuality: Int
+    var maxWidth: Int
+    var framesPerSecond: Int
+
+    var intervalMs: Int { max(8, 1000 / max(framesPerSecond, 1)) }
+
+    static let smooth = StreamQualitySettings(jpegQuality: 62, maxWidth: 1280, framesPerSecond: 30)
+    static let balanced = StreamQualitySettings(jpegQuality: 85, maxWidth: 1920, framesPerSecond: 24)
+    static let sharp = StreamQualitySettings(jpegQuality: 92, maxWidth: 1920, framesPerSecond: 20)
+    static let maximum = StreamQualitySettings(jpegQuality: 95, maxWidth: 2560, framesPerSecond: 30)
+
+    static let widthChoices = [960, 1280, 1600, 1920, 2560]
+    static let fpsChoices = [10, 15, 20, 24, 30, 45, 60]
 }
 
 enum PairingError: LocalizedError {

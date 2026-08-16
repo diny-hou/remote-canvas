@@ -12,6 +12,7 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
     @State private var keyboardText = ""
     @State private var isKeyboardVisible = false
     @State private var isFileBrowserVisible = false
+    @State private var isQualityVisible = false
     @State private var privacyOverride: Bool?
     @State private var privacyHole: CGPoint?
     @State private var isContentConcealed = false
@@ -60,7 +61,13 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .task { await transport.connect() }
+        .task {
+            await transport.connect()
+            try? await transport.send(streamQuality: appModel.streamQuality)
+        }
+        .onChange(of: appModel.streamQuality) { _, quality in
+            Task { try? await transport.send(streamQuality: quality) }
+        }
         .onChange(of: transport.discoveredEndpoints) { _, endpoints in
             appModel.mergeEndpoints(endpoints, into: device.id)
         }
@@ -87,6 +94,21 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
             isScreenCaptured = UIScreen.main.isCaptured
+        }
+        .sheet(isPresented: $isQualityVisible) {
+            NavigationStack {
+                Form {
+                    StreamQualityControls(appModel: appModel)
+                }
+                .navigationTitle("Picture and speed")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { isQualityVisible = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $isFileBrowserVisible) {
             RemoteFileBrowserView(
@@ -142,6 +164,13 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
                     Image(systemName: "keyboard")
                 }
                 .accessibilityLabel("Keyboard")
+
+                Button {
+                    isQualityVisible = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .accessibilityLabel("Picture and speed")
 
                 Button {
                     isFileBrowserVisible = true

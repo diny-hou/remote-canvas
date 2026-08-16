@@ -31,6 +31,7 @@ protocol RemoteSessionTransport: AnyObject {
     func connect() async
     func send(pointerEvent: PointerEvent) async throws
     func send(text: String) async throws
+    func send(streamQuality: StreamQualitySettings) async throws
     func disconnect() async
     func listFiles(path: String) async throws -> [RemoteFileEntry]
     func download(_ file: RemoteFileEntry) async throws -> URL
@@ -47,6 +48,7 @@ final class PreviewRemoteSessionTransport: RemoteSessionTransport {
     func connect() async {}
     func send(pointerEvent: PointerEvent) async throws {}
     func send(text: String) async throws {}
+    func send(streamQuality: StreamQualitySettings) async throws {}
     func disconnect() async {}
     func listFiles(path: String) async throws -> [RemoteFileEntry] { [] }
     func download(_ file: RemoteFileEntry) async throws -> URL { URL(fileURLWithPath: "/") }
@@ -94,6 +96,7 @@ final class LiveRemoteSession: RemoteSessionTransport {
     private var activeEndpoint: String?
     private var pendingMove: PointerEvent?
     private var moveFlushTask: Task<Void, Never>?
+    private var pendingStreamQuality: StreamQualitySettings?
 
     var latestFrame: Data?
     var statusText = "Waiting"
@@ -240,6 +243,16 @@ final class LiveRemoteSession: RemoteSessionTransport {
         try await sendJSON(["type": "text", "text": text])
     }
 
+    func send(streamQuality: StreamQualitySettings) async throws {
+        pendingStreamQuality = streamQuality
+        try await sendJSON([
+            "type": "set_stream_quality",
+            "interval_ms": streamQuality.intervalMs,
+            "jpeg_quality": streamQuality.jpegQuality,
+            "max_width": streamQuality.maxWidth
+        ])
+    }
+
     func disconnect() async {
         shouldReconnect = false
         receiveTask?.cancel()
@@ -295,6 +308,9 @@ final class LiveRemoteSession: RemoteSessionTransport {
                     await self?.receiveFrames()
                 }
                 lastError = nil
+                if let pendingStreamQuality {
+                    try? await send(streamQuality: pendingStreamQuality)
+                }
                 return
             }
             statusText = "Reconnecting"
