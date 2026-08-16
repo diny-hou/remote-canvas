@@ -29,8 +29,12 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>RemoteCanvas uses the local network to reach your Windows PC.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remotecanvas._tcp</string>
+	</array>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Unlock connection to a paired Windows PC.</string>
+	<string>Unlock connection to a paired Windows PC and reveal a hidden remote session.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing QR code shown on Windows.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

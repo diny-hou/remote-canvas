@@ -69,17 +69,12 @@ pub struct RemoteHostState {
 pub struct HostEndpoints {
     pub lan: String,
     pub tailscale: Option<String>,
+    candidates: Vec<String>,
 }
 
 impl HostEndpoints {
     pub fn all(&self) -> Vec<String> {
-        let mut endpoints = vec![self.lan.clone()];
-        if let Some(tailscale) = &self.tailscale {
-            if tailscale != &self.lan {
-                endpoints.push(tailscale.clone());
-            }
-        }
-        endpoints
+        self.candidates.clone()
     }
 }
 
@@ -246,20 +241,48 @@ impl RemoteHostState {
 
 pub fn discover_endpoints() -> HostEndpoints {
     let interfaces = local_ip_address::list_afinet_netifas().unwrap_or_default();
-    let addresses = interfaces
-        .into_iter()
-        .map(|(_, address)| address)
-        .collect::<Vec<_>>();
-    let lan = addresses
-        .iter()
+    let mut lan_ips = Vec::new();
+    let mut tailscale = None;
+
+    for (name, address) in &interfaces {
+        if is_tailscale_address(address) {
+            tailscale = Some(*address);
+            continue;
+        }
+        if is_usable_lan(address) && !is_virtual_interface(name) {
+            lan_ips.push(*address);
+        }
+    }
+
+    lan_ips.sort_by_key(lan_priority);
+    lan_ips.dedup();
+
+    let lan = lan_ips
+        .first()
         .copied()
-        .find(is_private_lan)
-        .or_else(|| local_ip_address::local_ip().ok())
+        .or(tailscale)
+        .or_else(|| {
+            local_ip_address::local_ip()
+                .ok()
+                .filter(|address| is_usable_lan(address))
+        })
         .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
-    let tailscale = addresses.iter().copied().find(is_tailscale_address);
+
+    let mut candidates = lan_ips.into_iter().map(https_endpoint).collect::<Vec<_>>();
+    if let Some(address) = tailscale {
+        let endpoint = https_endpoint(address);
+        if !candidates.contains(&endpoint) {
+            candidates.push(endpoint);
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push(https_endpoint(lan));
+    }
+
     HostEndpoints {
         lan: https_endpoint(lan),
         tailscale: tailscale.map(https_endpoint),
+        candidates,
     }
 }
 
@@ -281,15 +304,60 @@ fn is_tailscale_address(address: &IpAddr) -> bool {
 }
 
 fn is_private_lan(address: &IpAddr) -> bool {
+    is_usable_lan(address) || matches!(address, IpAddr::V4(ip) if ip.is_loopback())
+}
+
+fn is_usable_lan(address: &IpAddr) -> bool {
     match address {
-        IpAddr::V4(address) => {
+        IpAddr::V4(address) if !address.is_loopback() && !address.is_link_local() => {
             let octets = address.octets();
             octets[0] == 10
                 || (octets[0] == 172 && (16..=31).contains(&octets[1]))
                 || (octets[0] == 192 && octets[1] == 168)
-                || octets[0] == 127
         }
-        IpAddr::V6(address) => address.is_loopback(),
+        _ => false,
+    }
+}
+
+fn is_virtual_interface(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if (name.contains("wi-fi") || name.contains("wifi") || name.contains("wlan") || name.contains("ethernet"))
+        && !name.contains("vethernet")
+        && !name.contains("wsl")
+    {
+        return false;
+    }
+    [
+        "loopback",
+        "wsl",
+        "vethernet",
+        "virtualbox",
+        "vmware",
+        "hyper-v",
+        "docker",
+        "vbox",
+        "bluetooth",
+        "vmnet",
+        "tap-windows",
+        "npcap",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
+fn lan_priority(address: &IpAddr) -> u8 {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            if octets[0] == 192 && octets[1] == 168 {
+                0
+            } else if octets[0] == 10 {
+                1
+            } else {
+                2
+            }
+        }
+        IpAddr::V6(_) => 9,
     }
 }
 
@@ -386,6 +454,8 @@ enum ClientCommand {
 
 pub fn start(state: RemoteHostState) {
     tauri::async_runtime::spawn(async move {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        open_firewall_port();
         let (cert_pem, key_pem) = state.tls_pem();
         let tls = match RustlsConfig::from_pem(cert_pem, key_pem).await {
             Ok(tls) => tls,
@@ -413,6 +483,29 @@ pub fn start(state: RemoteHostState) {
             eprintln!("RemoteCanvas host stopped: {error}");
         }
     });
+}
+
+fn open_firewall_port() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=RemoteCanvas",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=47831",
+                "profile=any",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
 }
 
 async fn pair_device(
@@ -840,7 +933,8 @@ fn apply_input(command: ClientCommand) {
 #[cfg(test)]
 mod tests {
     use super::{
-        constant_time_equal, is_private_lan, is_tailscale_address, HostInner, PairingSession,
+        constant_time_equal, is_private_lan, is_tailscale_address, is_usable_lan,
+        is_virtual_interface, HostInner, PairingSession,
         RemoteHostState,
     };
     use crate::remote_host::store::PersistedState;
@@ -879,6 +973,10 @@ mod tests {
         assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
         assert!(!is_tailscale_address(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
         assert!(is_private_lan(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(is_usable_lan(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))));
+        assert!(!is_usable_lan(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_virtual_interface("vEthernet (WSL)"));
+        assert!(!is_virtual_interface("Wi-Fi"));
     }
 
     #[test]

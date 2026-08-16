@@ -66,7 +66,8 @@ struct PairedDevice: Identifiable, Hashable, Codable, Sendable {
     }
 
     private func lanRank(_ value: String) -> Int {
-        guard let host = URL(string: value)?.host else { return 2 }
+        guard let host = URL(string: value)?.host else { return 3 }
+        if host == "127.0.0.1" || host == "localhost" { return 3 }
         if host.hasPrefix("100.") { return 1 }
         return 0
     }

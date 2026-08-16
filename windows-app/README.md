@@ -43,7 +43,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 The installer is written to:
 
 ```text
-src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.4.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\RemoteCanvas Host_0.4.1_x64-setup.exe
 ```
 
 For a combined build/install attempt, use:

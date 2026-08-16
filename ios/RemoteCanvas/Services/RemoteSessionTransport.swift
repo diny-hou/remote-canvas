@@ -20,6 +20,7 @@ struct PointerEvent: Sendable, Equatable {
 protocol RemoteSessionTransport: AnyObject {
     var latestFrame: Data? { get }
     var statusText: String { get }
+    var isUsingLAN: Bool { get }
     func connect() async
     func send(pointerEvent: PointerEvent) async throws
     func send(text: String) async throws
@@ -33,6 +34,7 @@ protocol RemoteSessionTransport: AnyObject {
 final class PreviewRemoteSessionTransport: RemoteSessionTransport {
     var latestFrame: Data?
     var statusText: String { "Preview" }
+    var isUsingLAN: Bool { true }
     func connect() async {}
     func send(pointerEvent: PointerEvent) async throws {}
     func send(text: String) async throws {}
@@ -85,12 +87,14 @@ final class LiveRemoteSession: RemoteSessionTransport {
     var latestFrame: Data?
     var statusText = "Waiting"
     var isConnected = false
+    var isUsingLAN = false
 
     init(device: PairedDevice) {
         self.device = device
         let pinDelegate = PinDelegate(expectedSha256: device.certSha256)
         self.pinDelegate = pinDelegate
         self.session = URLSession(configuration: .ephemeral, delegate: pinDelegate, delegateQueue: nil)
+        self.isUsingLAN = device.preferredEndpoints.first.map(isLikelyLAN) ?? false
     }
 
     static func exchangePairingCode(
@@ -99,7 +103,8 @@ final class LiveRemoteSession: RemoteSessionTransport {
         certSha256: String?
     ) async throws -> PairingResult {
         var lastError: Error = SessionError.invalidEndpoint
-        for endpoint in endpoints {
+        let reachable = endpoints.filter { !isLoopback($0) }
+        for endpoint in (reachable.isEmpty ? endpoints : reachable) {
             do {
                 return try await exchangePairingCode(endpoint: endpoint, code: code, certSha256: certSha256)
             } catch {
@@ -124,16 +129,22 @@ final class LiveRemoteSession: RemoteSessionTransport {
         guard let url = components.url else { throw SessionError.invalidEndpoint }
 
         let pin = PinDelegate(expectedSha256: certSha256)
-        let session = URLSession(configuration: .ephemeral, delegate: pin, delegateQueue: nil)
+        let session = URLSession(configuration: .default, delegate: pin, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
-        var request = URLRequest(url: url, timeoutInterval: isLikelyLAN(endpoint) ? 1.2 : 5)
+        var request = URLRequest(url: url, timeoutInterval: 12)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             PairingRequest(code: code, clientName: UIDevice.current.name)
         )
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw mapPairingError(error, endpoint: endpoint)
+        }
         guard let http = response as? HTTPURLResponse else {
             throw SessionError.server("Unexpected response from Windows.")
         }
@@ -247,14 +258,15 @@ final class LiveRemoteSession: RemoteSessionTransport {
     private func openSocket() async -> Bool {
         for endpoint in device.preferredEndpoints {
             guard await probe(endpoint), let url = websocketURL(from: endpoint) else { continue }
-            var request = URLRequest(url: url, timeoutInterval: isLikelyLAN(endpoint) ? 1.2 : 6)
+            var request = URLRequest(url: url, timeoutInterval: 10)
             applyAuth(&request, path: isLikelyLAN(endpoint) ? "lan" : "tailscale")
             let task = session.webSocketTask(with: request)
             socket = task
             task.resume()
             activeEndpoint = endpoint
             isConnected = true
-            statusText = isLikelyLAN(endpoint) ? "LAN" : "Remote"
+            isUsingLAN = isLikelyLAN(endpoint)
+            statusText = isUsingLAN ? "LAN" : "Remote"
             return true
         }
         socket = nil
@@ -266,7 +278,7 @@ final class LiveRemoteSession: RemoteSessionTransport {
         guard var components = URLComponents(string: endpoint) else { return false }
         components.path = "/health"
         guard let url = components.url else { return false }
-        var request = URLRequest(url: url, timeoutInterval: isLikelyLAN(endpoint) ? 0.45 : 3)
+        var request = URLRequest(url: url, timeoutInterval: isLikelyLAN(endpoint) ? 3 : 8)
         do {
             let (_, response) = try await session.data(for: request)
             return ((response as? HTTPURLResponse)?.statusCode ?? 500) < 300
@@ -284,7 +296,8 @@ final class LiveRemoteSession: RemoteSessionTransport {
                 case .data(let data):
                     latestFrame = data
                     if let activeEndpoint {
-                        statusText = isLikelyLAN(activeEndpoint) ? "LAN" : "Remote"
+                        isUsingLAN = isLikelyLAN(activeEndpoint)
+                        statusText = isUsingLAN ? "LAN" : "Remote"
                     }
                 case .string:
                     break
@@ -350,9 +363,25 @@ final class LiveRemoteSession: RemoteSessionTransport {
     }
 }
 
+private func mapPairingError(_ error: Error, endpoint: String) -> Error {
+    let nsError = error as NSError
+    if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+        return LiveRemoteSession.SessionError.server("Timed out reaching \(endpoint)")
+    }
+    if nsError.domain == NSURLErrorDomain && (nsError.code == NSURLErrorCancelled || nsError.code == NSURLErrorServerCertificateUntrusted) {
+        return LiveRemoteSession.SessionError.server("Could not trust \(endpoint). Scan the QR again.")
+    }
+    return LiveRemoteSession.SessionError.server("\(endpoint): \(error.localizedDescription)")
+}
+
+private func isLoopback(_ endpoint: String) -> Bool {
+    guard let host = URL(string: endpoint)?.host else { return false }
+    return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
 private func isLikelyLAN(_ endpoint: String) -> Bool {
     guard let host = URL(string: endpoint)?.host else { return false }
-    if host.hasPrefix("100.") { return false }
+    if host.hasPrefix("100.") || isLoopback(endpoint) { return false }
     return host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("172.")
 }
 
