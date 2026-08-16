@@ -606,10 +606,9 @@ async fn websocket_upgrade(
 async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
     let quality = Arc::new(Mutex::new(quality));
     let selected_display = Arc::new(Mutex::new(None::<u32>));
+    let initial_display = *lock(&selected_display);
     let _ = socket
-        .send(Message::Text(
-            displays_message(*lock(&selected_display)).into(),
-        ))
+        .send(Message::Text(displays_message(initial_display).into()))
         .await;
     let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(Vec::<u8>::new());
     let capture_quality = quality.clone();
@@ -675,19 +674,25 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                                     *current = merge_stream_quality(*current, interval_ms, jpeg_quality, max_width);
                                 }
                                 ClientCommand::SetDisplay { id } => {
-                                    *lock(&selected_display) = Some(id);
+                                    {
+                                        *lock(&selected_display) = Some(id);
+                                    }
                                     let payload = displays_message(Some(id));
                                     if socket.send(Message::Text(payload.into())).await.is_err() {
                                         break;
                                     }
                                 }
                                 ClientCommand::ListDisplays => {
-                                    let payload = displays_message(*lock(&selected_display));
+                                    let selected = *lock(&selected_display);
+                                    let payload = displays_message(selected);
                                     if socket.send(Message::Text(payload.into())).await.is_err() {
                                         break;
                                     }
                                 }
-                                other => apply_input(other, *lock(&selected_display)),
+                                other => {
+                                    let selected = *lock(&selected_display);
+                                    apply_input(other, selected);
+                                }
                             }
                         }
                     }
