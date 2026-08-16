@@ -51,7 +51,12 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
     private var lastPointer = CGPoint(x: 0.5, y: 0.5)
     private var pinchStart: CGFloat = 1
     private var pinchAnchorInImage = CGPoint.zero
-    private var isPinching = false
+    private var twoFingerActive = false
+    private var twoFingerIntent: TwoFingerIntent = .undecided
+    private var twoFingerStartMid = CGPoint.zero
+    private var twoFingerLastMid = CGPoint.zero
+    private var twoFingerStartDistance: CGFloat = 1
+    private var scrollAnchor = CGPoint.zero
     private var protectFromCapture = false
     private var decodeGeneration = 0
     private var isDragging = false
@@ -59,7 +64,7 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
     private var didSecondaryClick = false
     private var scrollRemainder = CGPoint.zero
     private var oneFingerDrag: UIPanGestureRecognizer!
-    private var twoFingerScroll: UIPanGestureRecognizer!
+    private var twoFingerPan: UIPanGestureRecognizer!
     private var threeFingerPan: UIPanGestureRecognizer!
     private var pinch: UIPinchGestureRecognizer!
 
@@ -182,16 +187,10 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
         let pair = [gestureRecognizer, other]
-        return pair.contains(where: { $0 === pinch }) && pair.contains(where: { $0 === twoFingerScroll })
+        return pair.contains(where: { $0 === pinch }) && pair.contains(where: { $0 === twoFingerPan })
     }
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if gestureRecognizer === twoFingerScroll {
-            return pinch.state != .began && pinch.state != .changed
-        }
-        if gestureRecognizer === pinch {
-            return true
-        }
         if gestureRecognizer === threeFingerPan {
             return scrollView.zoomScale > 1.02
         }
@@ -208,12 +207,12 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         oneFingerDrag.delegate = self
         touchLayer.addGestureRecognizer(oneFingerDrag)
 
-        twoFingerScroll = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerScroll(_:)))
-        twoFingerScroll.minimumNumberOfTouches = 2
-        twoFingerScroll.maximumNumberOfTouches = 2
-        twoFingerScroll.cancelsTouchesInView = false
-        twoFingerScroll.delegate = self
-        touchLayer.addGestureRecognizer(twoFingerScroll)
+        twoFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFinger(_:)))
+        twoFingerPan.minimumNumberOfTouches = 2
+        twoFingerPan.maximumNumberOfTouches = 2
+        twoFingerPan.cancelsTouchesInView = false
+        twoFingerPan.delegate = self
+        touchLayer.addGestureRecognizer(twoFingerPan)
 
         threeFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleThreeFingerPan(_:)))
         threeFingerPan.minimumNumberOfTouches = 3
@@ -296,36 +295,8 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
         }
     }
 
-    @objc private func handleTwoFingerScroll(_ gesture: UIPanGestureRecognizer) {
-        if gesture.state == .began {
-            scrollRemainder = .zero
-            sendPointer(at: gesture.location(in: self), action: .move)
-        }
-        guard gesture.state == .began || gesture.state == .changed else {
-            scrollRemainder = .zero
-            return
-        }
-        if isPinching || (pinch.state == .began || pinch.state == .changed && abs(pinch.scale - 1) > 0.04) {
-            scrollRemainder = .zero
-            return
-        }
-
-        scrollRemainder.x += gesture.translation(in: self).x
-        scrollRemainder.y += gesture.translation(in: self).y
-        gesture.setTranslation(.zero, in: self)
-
-        let unit: CGFloat = 10
-        let point = gesture.location(in: self)
-        let horizontalTicks = (-scrollRemainder.x / unit).rounded(.towardZero)
-        let verticalTicks = (-scrollRemainder.y / unit).rounded(.towardZero)
-        if abs(horizontalTicks) >= 1 {
-            scrollRemainder.x += horizontalTicks * unit
-            sendPointer(at: point, action: .scrollHorizontal(horizontalTicks))
-        }
-        if abs(verticalTicks) >= 1 {
-            scrollRemainder.y += verticalTicks * unit
-            sendPointer(at: point, action: .scroll(verticalTicks))
-        }
+    @objc private func handleTwoFinger(_ gesture: UIPanGestureRecognizer) {
+        handleTwoFingerGesture(gesture, desiredZoom: desiredZoom(from: gesture))
     }
 
     @objc private func handleThreeFingerPan(_ gesture: UIPanGestureRecognizer) {
@@ -336,28 +307,128 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
     }
 
     @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        handleTwoFingerGesture(gesture, desiredZoom: desiredZoom(from: gesture))
+    }
+
+    private func handleTwoFingerGesture(_ gesture: UIGestureRecognizer, desiredZoom: CGFloat) {
+        let mid = touchMidpoint(gesture)
         switch gesture.state {
         case .began:
-            isPinching = true
-            pinchStart = scrollView.zoomScale
-            pinchAnchorInImage = contentPoint(under: gesture.location(in: self))
-            applyPinch(scale: pinchStart, fingerInView: gesture.location(in: self), settle: false)
+            beginTwoFinger(at: mid, distance: touchDistance(gesture))
+            updateTwoFinger(desiredZoom: desiredZoom, mid: mid)
         case .changed:
-            applyPinch(
-                scale: pinchStart * gesture.scale,
-                fingerInView: gesture.location(in: self),
-                settle: false
-            )
-        case .ended, .cancelled:
-            applyPinch(
-                scale: pinchStart * gesture.scale,
-                fingerInView: gesture.location(in: self),
-                settle: true
-            )
-            isPinching = false
+            updateTwoFinger(desiredZoom: desiredZoom, mid: mid)
+        case .ended, .cancelled, .failed:
+            finishTwoFinger(desiredZoom: desiredZoom, mid: mid)
         default:
             break
         }
+    }
+
+    private func beginTwoFinger(at mid: CGPoint, distance: CGFloat) {
+        guard !twoFingerActive else { return }
+        twoFingerActive = true
+        twoFingerIntent = .undecided
+        pinchStart = scrollView.zoomScale
+        pinchAnchorInImage = contentPoint(under: mid)
+        twoFingerStartMid = mid
+        twoFingerLastMid = mid
+        twoFingerStartDistance = max(distance, 1)
+        scrollAnchor = mid
+        scrollRemainder = .zero
+    }
+
+    private func updateTwoFinger(desiredZoom: CGFloat, mid: CGPoint) {
+        guard twoFingerActive else {
+            beginTwoFinger(at: mid, distance: twoFingerStartDistance)
+            return
+        }
+        let factor = desiredZoom / max(pinchStart, 0.001)
+        let translation = CGPoint(x: mid.x - twoFingerStartMid.x, y: mid.y - twoFingerStartMid.y)
+        resolveTwoFingerIntent(scaleFactor: factor, translation: translation)
+        switch twoFingerIntent {
+        case .undecided:
+            twoFingerLastMid = mid
+        case .zoom:
+            applyPinch(scale: desiredZoom, fingerInView: mid, settle: false)
+            twoFingerLastMid = mid
+        case .scroll:
+            let delta = CGPoint(x: mid.x - twoFingerLastMid.x, y: mid.y - twoFingerLastMid.y)
+            twoFingerLastMid = mid
+            if scrollView.zoomScale > 1.05 {
+                panZoomedView(by: delta)
+            } else {
+                applyRemoteScroll(delta)
+            }
+        }
+    }
+
+    private func finishTwoFinger(desiredZoom: CGFloat, mid: CGPoint) {
+        let pinchGoing = pinch.state == .began || pinch.state == .changed
+        let panGoing = twoFingerPan.state == .began || twoFingerPan.state == .changed
+        guard !pinchGoing, !panGoing else { return }
+        if twoFingerIntent == .zoom {
+            applyPinch(scale: desiredZoom, fingerInView: mid, settle: true)
+        }
+        twoFingerActive = false
+        twoFingerIntent = .undecided
+        scrollRemainder = .zero
+    }
+
+    private func resolveTwoFingerIntent(scaleFactor: CGFloat, translation: CGPoint) {
+        guard twoFingerIntent == .undecided else { return }
+        let zoomAmount = abs(scaleFactor - 1)
+        let moveAmount = hypot(translation.x, translation.y)
+        if zoomAmount >= 0.07 {
+            twoFingerIntent = .zoom
+        } else if moveAmount >= 12 {
+            twoFingerIntent = .scroll
+            if scrollView.zoomScale <= 1.05 {
+                sendPointer(at: scrollAnchor, action: .move)
+            }
+            twoFingerLastMid = twoFingerStartMid
+        }
+    }
+
+    private func desiredZoom(from gesture: UIGestureRecognizer) -> CGFloat {
+        let distance = touchDistance(gesture)
+        if twoFingerActive, twoFingerStartDistance > 1, distance > 1 {
+            return pinchStart * (distance / twoFingerStartDistance)
+        }
+        if pinch.state == .began || pinch.state == .changed {
+            return (twoFingerActive ? pinchStart : scrollView.zoomScale) * pinch.scale
+        }
+        return scrollView.zoomScale
+    }
+
+    private func applyRemoteScroll(_ delta: CGPoint) {
+        scrollRemainder.x += delta.x
+        scrollRemainder.y += delta.y
+        let unit: CGFloat = 6
+        let horizontalTicks = (-scrollRemainder.x / unit).rounded(.towardZero)
+        let verticalTicks = (-scrollRemainder.y / unit).rounded(.towardZero)
+        if abs(horizontalTicks) >= 1 {
+            scrollRemainder.x += horizontalTicks * unit
+            sendPointer(at: scrollAnchor, action: .scrollHorizontal(horizontalTicks))
+        }
+        if abs(verticalTicks) >= 1 {
+            scrollRemainder.y += verticalTicks * unit
+            sendPointer(at: scrollAnchor, action: .scroll(verticalTicks))
+        }
+    }
+
+    private func touchDistance(_ gesture: UIGestureRecognizer) -> CGFloat {
+        guard gesture.numberOfTouches >= 2 else { return 0 }
+        let first = gesture.location(ofTouch: 0, in: self)
+        let second = gesture.location(ofTouch: 1, in: self)
+        return hypot(first.x - second.x, first.y - second.y)
+    }
+
+    private func touchMidpoint(_ gesture: UIGestureRecognizer) -> CGPoint {
+        guard gesture.numberOfTouches >= 2 else { return gesture.location(in: self) }
+        let first = gesture.location(ofTouch: 0, in: self)
+        let second = gesture.location(ofTouch: 1, in: self)
+        return CGPoint(x: (first.x + second.x) / 2, y: (first.y + second.y) / 2)
     }
 
     @objc private func endDragIfNeeded() {
@@ -535,6 +606,12 @@ final class RemoteScreenUIView: UIView, UIScrollViewDelegate, UIGestureRecognize
             path.stroke()
         }
     }()
+}
+
+private enum TwoFingerIntent {
+    case undecided
+    case zoom
+    case scroll
 }
 
 private final class TouchSurfaceView: UIView {
