@@ -8,6 +8,8 @@ import UIKit
 struct PointerEvent: Sendable, Equatable {
     enum Action: Sendable, Equatable {
         case move
+        case primaryDown
+        case primaryUp
         case primaryClick
         case secondaryClick
         case doubleClick
@@ -202,6 +204,12 @@ final class LiveRemoteSession: RemoteSessionTransport {
         switch pointerEvent.action {
         case .move:
             action = "move"
+            delta = 0
+        case .primaryDown:
+            action = "primary_down"
+            delta = 0
+        case .primaryUp:
+            action = "primary_up"
             delta = 0
         case .primaryClick:
             action = "primary_click"

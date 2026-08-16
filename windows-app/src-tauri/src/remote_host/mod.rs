@@ -224,6 +224,8 @@ impl RemoteHostState {
 
     fn mark_disconnected(&self) {
         lock(&self.inner).active = None;
+        #[cfg(target_os = "windows")]
+        release_mouse_buttons();
     }
 
     fn tls_pem(&self) -> (Vec<u8>, Vec<u8>) {
@@ -961,6 +963,14 @@ fn apply_input(command: ClientCommand) {
             let (px, py) = screen_point(x, y);
             match action.as_str() {
                 "move" => send_mouse(px, py, 0, 0),
+                "primary_down" => {
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTDOWN, 0);
+                }
+                "primary_up" => {
+                    send_mouse(px, py, 0, 0);
+                    send_mouse(px, py, MOUSEEVENTF_LEFTUP, 0);
+                }
                 "primary_click" => {
                     send_mouse(px, py, 0, 0);
                     send_mouse(px, py, MOUSEEVENTF_LEFTDOWN, 0);
@@ -1004,6 +1014,22 @@ fn screen_point(x: f64, y: f64) -> (i32, i32) {
         origin_x + (x.clamp(0.0, 1.0) * width as f64) as i32,
         origin_y + (y.clamp(0.0, 1.0) * height as f64) as i32,
     )
+}
+
+#[cfg(target_os = "windows")]
+fn release_mouse_buttons() {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+    }
+    send_mouse(point.x, point.y, MOUSEEVENTF_LEFTUP, 0);
+    send_mouse(point.x, point.y, MOUSEEVENTF_RIGHTUP, 0);
 }
 
 #[cfg(target_os = "windows")]
