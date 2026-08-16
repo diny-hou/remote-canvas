@@ -18,13 +18,14 @@ struct GithubRelease {
 
 #[derive(Deserialize)]
 struct GithubAsset {
+    id: u64,
     name: String,
-    browser_download_url: String,
 }
 
 pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, String> {
     let client = reqwest::Client::builder()
         .user_agent("RemoteCanvas-Host")
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|error| error.to_string())?;
     let release = client
@@ -34,7 +35,7 @@ pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, Strin
         .await
         .map_err(|error| error.to_string())?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| map_github_error(error, "release list"))?
         .json::<GithubRelease>()
         .await
         .map_err(|error| error.to_string())?;
@@ -50,16 +51,26 @@ pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, Strin
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name.ends_with("-setup.exe") || asset.name.ends_with(".exe"))
+        .find(|asset| asset.name == "RemoteCanvasHost-setup.exe")
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name.ends_with("-setup.exe") || asset.name.ends_with(".exe"))
+        })
         .ok_or_else(|| "Latest release has no Windows installer".to_string())?;
 
     let bytes = client
-        .get(&asset.browser_download_url)
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases/assets/{}",
+            asset.id
+        ))
+        .header("Accept", "application/octet-stream")
         .send()
         .await
         .map_err(|error| error.to_string())?
         .error_for_status()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| map_github_error(error, "installer"))?
         .bytes()
         .await
         .map_err(|error| error.to_string())?;
@@ -74,6 +85,14 @@ pub async fn install_latest(current_version: &str) -> Result<UpdateStatus, Strin
         status: "installing",
         version: latest,
     })
+}
+
+fn map_github_error(error: reqwest::Error, what: &str) -> String {
+    if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+        format!("Could not find the {what}. The GitHub repository must be public.")
+    } else {
+        error.to_string()
+    }
 }
 
 fn version_tuple(version: &str) -> (u64, u64, u64) {
