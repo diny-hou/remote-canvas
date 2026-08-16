@@ -12,6 +12,7 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
     @State private var isKeyboardVisible = false
     @State private var isFileBrowserVisible = false
     @State private var isQualityVisible = false
+    @State private var isDisplayPickerVisible = false
     @State private var privacyOverride: Bool?
     @State private var privacyHole: CGPoint?
     @State private var isContentConcealed = false
@@ -63,6 +64,7 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
         .task {
             await transport.connect()
             try? await transport.send(streamQuality: appModel.streamQuality)
+            await transport.refreshDisplays()
         }
         .onChange(of: appModel.streamQuality) { _, quality in
             Task { try? await transport.send(streamQuality: quality) }
@@ -93,6 +95,28 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
             isScreenCaptured = UIScreen.main.isCaptured
+        }
+        .sheet(isPresented: $isDisplayPickerVisible) {
+            NavigationStack {
+                DisplayPickerView(
+                    displays: transport.displays,
+                    selectedId: transport.selectedDisplayId
+                ) { id in
+                    Task {
+                        try? await transport.selectDisplay(id: id)
+                        isDisplayPickerVisible = false
+                    }
+                }
+                .navigationTitle("Displays")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { isDisplayPickerVisible = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $isQualityVisible) {
             NavigationStack {
@@ -163,6 +187,15 @@ struct RemoteSessionView<Transport: RemoteSessionTransport>: View {
                     Image(systemName: "keyboard")
                 }
                 .accessibilityLabel("Keyboard")
+
+                if transport.displays.count > 1 {
+                    Button {
+                        isDisplayPickerVisible = true
+                    } label: {
+                        Image(systemName: "rectangle.on.rectangle")
+                    }
+                    .accessibilityLabel("Switch display")
+                }
 
                 Button {
                     isQualityVisible = true

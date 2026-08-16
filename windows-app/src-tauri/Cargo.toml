@@ -1,6 +1,6 @@
 [package]
 name = "remote-canvas-host"
-version = "0.4.10"
+version = "0.4.11"
 description = "RemoteCanvas Windows host shell"
 authors = ["RemoteCanvas"]
 edition = "2021"

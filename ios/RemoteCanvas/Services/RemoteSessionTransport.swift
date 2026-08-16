@@ -21,6 +21,16 @@ struct PointerEvent: Sendable, Equatable {
     let action: Action
 }
 
+struct RemoteDisplay: Codable, Identifiable, Hashable, Sendable {
+    let id: UInt32
+    let name: String
+    let x: Int
+    let y: Int
+    let width: UInt32
+    let height: UInt32
+    let isPrimary: Bool
+}
+
 @MainActor
 protocol RemoteSessionTransport: AnyObject {
     var latestFrame: Data? { get }
@@ -28,10 +38,14 @@ protocol RemoteSessionTransport: AnyObject {
     var lastError: String? { get }
     var isUsingLAN: Bool { get }
     var discoveredEndpoints: [String] { get }
+    var displays: [RemoteDisplay] { get }
+    var selectedDisplayId: UInt32? { get }
     func connect() async
     func send(pointerEvent: PointerEvent) async throws
     func send(text: String) async throws
     func send(streamQuality: StreamQualitySettings) async throws
+    func selectDisplay(id: UInt32) async throws
+    func refreshDisplays() async
     func disconnect() async
     func listFiles(path: String) async throws -> [RemoteFileEntry]
     func download(_ file: RemoteFileEntry) async throws -> URL
@@ -45,10 +59,17 @@ final class PreviewRemoteSessionTransport: RemoteSessionTransport {
     var lastError: String? { nil }
     var isUsingLAN: Bool { true }
     var discoveredEndpoints: [String] { [] }
+    var displays: [RemoteDisplay] = [
+        RemoteDisplay(id: 1, name: "Main display", x: 0, y: 0, width: 1920, height: 1080, isPrimary: true),
+        RemoteDisplay(id: 2, name: "Second display", x: 1920, y: 0, width: 2560, height: 1440, isPrimary: false)
+    ]
+    var selectedDisplayId: UInt32? = 1
     func connect() async {}
     func send(pointerEvent: PointerEvent) async throws {}
     func send(text: String) async throws {}
     func send(streamQuality: StreamQualitySettings) async throws {}
+    func selectDisplay(id: UInt32) async throws { selectedDisplayId = id }
+    func refreshDisplays() async {}
     func disconnect() async {}
     func listFiles(path: String) async throws -> [RemoteFileEntry] { [] }
     func download(_ file: RemoteFileEntry) async throws -> URL { URL(fileURLWithPath: "/") }
@@ -97,6 +118,7 @@ final class LiveRemoteSession: RemoteSessionTransport {
     private var pendingMove: PointerEvent?
     private var moveFlushTask: Task<Void, Never>?
     private var pendingStreamQuality: StreamQualitySettings?
+    private var pendingDisplayId: UInt32?
 
     var latestFrame: Data?
     var statusText = "Waiting"
@@ -104,6 +126,8 @@ final class LiveRemoteSession: RemoteSessionTransport {
     var isConnected = false
     var isUsingLAN = false
     var discoveredEndpoints: [String] = []
+    var displays: [RemoteDisplay] = []
+    var selectedDisplayId: UInt32?
 
     init(device: PairedDevice) {
         self.device = device
@@ -253,6 +277,20 @@ final class LiveRemoteSession: RemoteSessionTransport {
         ])
     }
 
+    func selectDisplay(id: UInt32) async throws {
+        pendingDisplayId = id
+        selectedDisplayId = id
+        try await sendJSON(["type": "set_display", "id": id])
+    }
+
+    func refreshDisplays() async {
+        if let listed = try? await fetchDisplays() {
+            applyDisplays(listed.displays, selected: listed.selected)
+            return
+        }
+        try? await sendJSON(["type": "list_displays"])
+    }
+
     func disconnect() async {
         shouldReconnect = false
         receiveTask?.cancel()
@@ -315,6 +353,11 @@ final class LiveRemoteSession: RemoteSessionTransport {
                 if let pendingStreamQuality {
                     try? await send(streamQuality: pendingStreamQuality)
                 }
+                if let pendingDisplayId {
+                    try? await selectDisplay(id: pendingDisplayId)
+                } else {
+                    await refreshDisplays()
+                }
                 return
             }
             statusText = "Reconnecting"
@@ -337,8 +380,13 @@ final class LiveRemoteSession: RemoteSessionTransport {
         task.resume()
         do {
             let message = try await receiveOnce(task, timeout: 8)
-            if case .data(let data) = message {
+            switch message {
+            case .data(let data):
                 latestFrame = data
+            case .string(let text):
+                applyHostMessage(text)
+            @unknown default:
+                break
             }
         } catch {
             task.cancel(with: .goingAway, reason: nil)
@@ -467,8 +515,8 @@ final class LiveRemoteSession: RemoteSessionTransport {
                         isUsingLAN = isLikelyLAN(activeEndpoint)
                         statusText = isUsingLAN ? "LAN" : "Remote"
                     }
-                case .string:
-                    break
+                case .string(let text):
+                    applyHostMessage(text)
                 @unknown default:
                     break
                 }
@@ -520,6 +568,31 @@ final class LiveRemoteSession: RemoteSessionTransport {
         guard (200..<300).contains(http.statusCode) else {
             let message = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw SessionError.server(message)
+        }
+    }
+
+    private func fetchDisplays() async throws -> DisplaysPayload {
+        var request = try apiRequest(path: "/api/displays", queryItems: [])
+        request.httpMethod = "GET"
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(DisplaysPayload.self, from: data)
+    }
+
+    private func applyHostMessage(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(DisplaysPayload.self, from: data),
+              payload.type == "displays"
+        else { return }
+        applyDisplays(payload.displays, selected: payload.selected)
+    }
+
+    private func applyDisplays(_ displays: [RemoteDisplay], selected: UInt32?) {
+        self.displays = displays
+        if let pendingDisplayId, displays.contains(where: { $0.id == pendingDisplayId }) {
+            selectedDisplayId = pendingDisplayId
+        } else {
+            selectedDisplayId = selected ?? displays.first(where: \.isPrimary)?.id ?? displays.first?.id
         }
     }
 
@@ -604,6 +677,12 @@ final class PinDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
 
 private struct HealthInfo: Decodable {
     let endpoints: [String]?
+}
+
+private struct DisplaysPayload: Decodable {
+    let type: String
+    let displays: [RemoteDisplay]
+    let selected: UInt32?
 }
 
 @MainActor

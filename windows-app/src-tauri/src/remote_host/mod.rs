@@ -424,6 +424,27 @@ struct FileEntry {
     modified_unix_seconds: u64,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DisplayEntry {
+    id: u32,
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    is_primary: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplaysPayload {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    displays: Vec<DisplayEntry>,
+    selected: Option<u32>,
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -469,6 +490,10 @@ enum ClientCommand {
         #[serde(default)]
         max_width: u32,
     },
+    SetDisplay {
+        id: u32,
+    },
+    ListDisplays,
 }
 
 pub fn start(state: RemoteHostState) {
@@ -490,6 +515,7 @@ pub fn start(state: RemoteHostState) {
             .route("/api/pair", post(pair_device))
             .route("/ws", get(websocket_upgrade))
             .route("/api/files", get(list_files))
+            .route("/api/displays", get(list_displays))
             .route("/api/file", get(download_file).put(upload_file))
             .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES as usize))
             .with_state(state);
@@ -579,14 +605,22 @@ async fn websocket_upgrade(
 
 async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
     let quality = Arc::new(Mutex::new(quality));
+    let selected_display = Arc::new(Mutex::new(None::<u32>));
+    let _ = socket
+        .send(Message::Text(
+            displays_message(*lock(&selected_display)).into(),
+        ))
+        .await;
     let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(Vec::<u8>::new());
     let capture_quality = quality.clone();
+    let capture_display = selected_display.clone();
     tokio::spawn(async move {
         loop {
             let started = Instant::now();
             let current = *lock(&capture_quality);
+            let display_id = *lock(&capture_display);
             let captured = tokio::task::spawn_blocking(move || {
-                capture_primary_display(current.max_width, current.jpeg_quality)
+                capture_selected_display(display_id, current.max_width, current.jpeg_quality)
             })
             .await;
             match captured {
@@ -631,16 +665,29 @@ async fn handle_websocket(mut socket: WebSocket, quality: StreamQuality) {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(command) = serde_json::from_str::<ClientCommand>(&text) {
-                            if let ClientCommand::SetStreamQuality {
-                                interval_ms,
-                                jpeg_quality,
-                                max_width,
-                            } = command
-                            {
-                                let mut current = lock(&quality);
-                                *current = merge_stream_quality(*current, interval_ms, jpeg_quality, max_width);
-                            } else {
-                                apply_input(command);
+                            match command {
+                                ClientCommand::SetStreamQuality {
+                                    interval_ms,
+                                    jpeg_quality,
+                                    max_width,
+                                } => {
+                                    let mut current = lock(&quality);
+                                    *current = merge_stream_quality(*current, interval_ms, jpeg_quality, max_width);
+                                }
+                                ClientCommand::SetDisplay { id } => {
+                                    *lock(&selected_display) = Some(id);
+                                    let payload = displays_message(Some(id));
+                                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                ClientCommand::ListDisplays => {
+                                    let payload = displays_message(*lock(&selected_display));
+                                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                other => apply_input(other, *lock(&selected_display)),
                             }
                         }
                     }
@@ -676,6 +723,26 @@ fn merge_stream_quality(
             max_width.clamp(640, 3840)
         },
     }
+}
+
+async fn list_displays(
+    State(state): State<RemoteHostState>,
+    headers: HeaderMap,
+) -> Response {
+    if authorize(&headers, &state).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let displays = collect_displays();
+    let selected = displays
+        .iter()
+        .find(|display| display.is_primary)
+        .map(|display| display.id);
+    Json(DisplaysPayload {
+        kind: "displays",
+        displays,
+        selected,
+    })
+    .into_response()
 }
 
 async fn list_files(
@@ -1051,11 +1118,73 @@ fn notify_connected(name: &str, via: &str) {
     }
 }
 
+fn displays_message(selected: Option<u32>) -> String {
+    let displays = collect_displays();
+    let selected = selected
+        .filter(|id| displays.iter().any(|display| display.id == *id))
+        .or_else(|| {
+            displays
+                .iter()
+                .find(|display| display.is_primary)
+                .map(|display| display.id)
+        });
+    serde_json::to_string(&DisplaysPayload {
+        kind: "displays",
+        displays,
+        selected,
+    })
+    .unwrap_or_else(|_| r#"{"type":"displays","displays":[],"selected":null}"#.into())
+}
+
+fn collect_displays() -> Vec<DisplayEntry> {
+    #[cfg(target_os = "windows")]
+    {
+        let Ok(mut screens) = screenshots::Screen::all() else {
+            return Vec::new();
+        };
+        screens.sort_by_key(|screen| (screen.display_info.x, screen.display_info.y));
+        screens
+            .iter()
+            .enumerate()
+            .map(|(index, screen)| {
+                let info = screen.display_info;
+                DisplayEntry {
+                    id: info.id,
+                    name: display_name(index, info.is_primary, screens.len()),
+                    x: info.x,
+                    y: info.y,
+                    width: info.width,
+                    height: info.height,
+                    is_primary: info.is_primary,
+                }
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+fn display_name(index: usize, is_primary: bool, count: usize) -> String {
+    if is_primary {
+        "Main display".into()
+    } else if count == 2 {
+        "Second display".into()
+    } else {
+        format!("Display {}", index + 1)
+    }
+}
+
 #[cfg(target_os = "windows")]
-fn capture_primary_display(max_width: u32, jpeg_quality: u8) -> Result<Vec<u8>, String> {
+fn capture_selected_display(
+    display_id: Option<u32>,
+    max_width: u32,
+    jpeg_quality: u8,
+) -> Result<Vec<u8>, String> {
     use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageBuffer, Rgba};
 
-    let screen = primary_screen()?;
+    let screen = selected_screen(display_id)?;
     let captured = screen.capture().map_err(|error| error.to_string())?;
     let width = captured.width();
     let height = captured.height();
@@ -1079,8 +1208,16 @@ fn capture_primary_display(max_width: u32, jpeg_quality: u8) -> Result<Vec<u8>, 
 }
 
 #[cfg(target_os = "windows")]
-fn primary_screen() -> Result<screenshots::Screen, String> {
+fn selected_screen(display_id: Option<u32>) -> Result<screenshots::Screen, String> {
     let screens = screenshots::Screen::all().map_err(|error| error.to_string())?;
+    if let Some(display_id) = display_id {
+        if let Some(screen) = screens
+            .iter()
+            .find(|screen| screen.display_info.id == display_id)
+        {
+            return Ok(*screen);
+        }
+    }
     screens
         .iter()
         .find(|screen| screen.display_info.is_primary)
@@ -1090,12 +1227,16 @@ fn primary_screen() -> Result<screenshots::Screen, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn capture_primary_display(_max_width: u32, _jpeg_quality: u8) -> Result<Vec<u8>, String> {
+fn capture_selected_display(
+    _display_id: Option<u32>,
+    _max_width: u32,
+    _jpeg_quality: u8,
+) -> Result<Vec<u8>, String> {
     Err("Screen capture is available in the Windows build".into())
 }
 
 #[cfg(target_os = "windows")]
-fn apply_input(command: ClientCommand) {
+fn apply_input(command: ClientCommand, display_id: Option<u32>) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN,
         MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
@@ -1108,7 +1249,7 @@ fn apply_input(command: ClientCommand) {
             action,
             delta,
         } => {
-            let (px, py) = screen_point(x, y);
+            let (px, py) = screen_point(x, y, display_id);
             match action.as_str() {
                 "move" => send_mouse(px, py, 0, 0),
                 "primary_down" => {
@@ -1149,13 +1290,15 @@ fn apply_input(command: ClientCommand) {
             }
         }
         ClientCommand::Text { text } => type_text(&text),
-        ClientCommand::SetStreamQuality { .. } => {}
+        ClientCommand::SetStreamQuality { .. }
+        | ClientCommand::SetDisplay { .. }
+        | ClientCommand::ListDisplays => {}
     }
 }
 
 #[cfg(target_os = "windows")]
-fn screen_point(x: f64, y: f64) -> (i32, i32) {
-    let display = primary_screen().ok().map(|screen| screen.display_info);
+fn screen_point(x: f64, y: f64, display_id: Option<u32>) -> (i32, i32) {
+    let display = selected_screen(display_id).ok().map(|screen| screen.display_info);
     let (origin_x, origin_y, width, height) = display
         .map(|display| (display.x, display.y, display.width, display.height))
         .unwrap_or((0, 0, 1920, 1080));
@@ -1229,7 +1372,7 @@ fn type_text(text: &str) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply_input(command: ClientCommand) {
+fn apply_input(command: ClientCommand, display_id: Option<u32>) {
     match command {
         ClientCommand::Pointer {
             x,
@@ -1237,12 +1380,14 @@ fn apply_input(command: ClientCommand) {
             action,
             delta,
         } => {
-            let _ = (x, y, action, delta);
+            let _ = (x, y, action, delta, display_id);
         }
         ClientCommand::Text { text } => {
             let _ = text;
         }
-        ClientCommand::SetStreamQuality { .. } => {}
+        ClientCommand::SetStreamQuality { .. }
+        | ClientCommand::SetDisplay { .. }
+        | ClientCommand::ListDisplays => {}
     }
 }
 
@@ -1353,5 +1498,22 @@ mod tests {
             .to_string()
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn parses_display_commands() {
+        let set: super::ClientCommand =
+            serde_json::from_str(r#"{"type":"set_display","id":7}"#).unwrap();
+        assert!(matches!(set, super::ClientCommand::SetDisplay { id: 7 }));
+        let list: super::ClientCommand =
+            serde_json::from_str(r#"{"type":"list_displays"}"#).unwrap();
+        assert!(matches!(list, super::ClientCommand::ListDisplays));
+    }
+
+    #[test]
+    fn names_secondary_display() {
+        assert_eq!(super::display_name(0, true, 2), "Main display");
+        assert_eq!(super::display_name(1, false, 2), "Second display");
+        assert_eq!(super::display_name(2, false, 3), "Display 3");
     }
 }

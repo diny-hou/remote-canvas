@@ -21,6 +21,7 @@
 		10000000000000000000000D /* FilePreviewSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* FilePreviewSupport.swift */; };
 		10000000000000000000000E /* FilePreviewViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* FilePreviewViews.swift */; };
 		10000000000000000000000F /* MobileVLCKit in Frameworks */ = {isa = PBXBuildFile; productRef = P00000000000000000000002 /* MobileVLCKit */; };
+		100000000000000000000010 /* DisplayPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* DisplayPickerView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,6 +39,7 @@
 		20000000000000000000000C /* RemoteCanvas.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteCanvas.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		20000000000000000000000D /* FilePreviewSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewSupport.swift; sourceTree = "<group>"; };
 		20000000000000000000000E /* FilePreviewViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewViews.swift; sourceTree = "<group>"; };
+		200000000000000000000010 /* DisplayPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayPickerView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +110,7 @@
 			isa = PBXGroup;
 			children = (
 				20000000000000000000000A /* RemoteWorkspaceView.swift */,
+				200000000000000000000010 /* DisplayPickerView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -207,6 +210,7 @@
 				10000000000000000000000A /* RemoteWorkspaceView.swift in Sources */,
 				10000000000000000000000D /* FilePreviewSupport.swift in Sources */,
 				10000000000000000000000E /* FilePreviewViews.swift in Sources */,
+				100000000000000000000010 /* DisplayPickerView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -253,7 +257,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = 9W45783256;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemoteCanvas/Info.plist;
@@ -270,7 +274,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.4.10;
+				MARKETING_VERSION = 0.4.11;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -292,7 +296,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = 9W45783256;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemoteCanvas/Info.plist;
@@ -309,7 +313,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.4.10;
+				MARKETING_VERSION = 0.4.11;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
