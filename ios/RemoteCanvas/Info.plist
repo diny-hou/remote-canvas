@@ -37,6 +37,10 @@
 	<string>Unlock connection to a paired Windows PC and reveal a hidden remote session.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing QR code shown on Windows.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

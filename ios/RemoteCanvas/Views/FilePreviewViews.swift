@@ -1,3 +1,4 @@
+import AVFoundation
 import AVKit
 import MobileVLCKit
 import QuickLook
@@ -6,7 +7,11 @@ import SwiftUI
 struct FilePreviewContainer: View {
     let item: FilePreviewItem
     var loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?
+    var sharedPlayback: VLCPlaybackController?
+    var onPlaylistChange: (([MediaPlaylistItem], Int) -> Void)?
     var onClose: () -> Void
+
+    @StateObject private var ownedPlayback = VLCPlaybackController()
 
     var body: some View {
         switch item {
@@ -16,7 +21,9 @@ struct FilePreviewContainer: View {
             RemoteMediaPlayerView(
                 playlist: playlist,
                 startIndex: start,
+                playback: sharedPlayback ?? ownedPlayback,
                 loadRemoteFile: loadRemoteFile,
+                onPlaylistChange: onPlaylistChange,
                 onClose: onClose
             )
         case .document(let url):
@@ -220,25 +227,31 @@ func makeMediaPlaylist(startingAt url: URL, in files: [URL]) -> FilePreviewItem 
 struct RemoteMediaPlayerView: View {
     @State private var items: [MediaPlaylistItem]
     @State private var index: Int
+    @ObservedObject var playback: VLCPlaybackController
     var loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?
+    var onPlaylistChange: (([MediaPlaylistItem], Int) -> Void)?
     var onClose: () -> Void
 
-    @StateObject private var playback = VLCPlaybackController()
     @State private var controlsVisible = true
     @State private var isLoadingTrack = false
     @State private var skipHint: String?
     @State private var hideTask: Task<Void, Never>?
     @State private var loadError: String?
+    @State private var dismissOffset: CGFloat = 0
 
     init(
         playlist: [MediaPlaylistItem],
         startIndex: Int,
+        playback: VLCPlaybackController,
         loadRemoteFile: ((RemoteFileEntry) async throws -> URL)?,
+        onPlaylistChange: (([MediaPlaylistItem], Int) -> Void)? = nil,
         onClose: @escaping () -> Void
     ) {
         _items = State(initialValue: playlist)
         _index = State(initialValue: min(max(startIndex, 0), max(playlist.count - 1, 0)))
+        self.playback = playback
         self.loadRemoteFile = loadRemoteFile
+        self.onPlaylistChange = onPlaylistChange
         self.onClose = onClose
     }
 
@@ -249,9 +262,30 @@ struct RemoteMediaPlayerView: View {
                 Color.black.ignoresSafeArea()
                 VLCVideoSurface(controller: playback)
                     .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture { toggleControls() }
-                    .gesture(seekSwipe)
+                    .allowsHitTesting(false)
+
+                PlayerInteractionLayer(
+                    onTap: handlePlayerTap,
+                    onDismissChanged: { translation in
+                        hideTask?.cancel()
+                        dismissOffset = max(0, translation)
+                    },
+                    onDismissEnded: { translation, velocity in
+                        if translation > 110 || velocity > 900 {
+                            closePlayer()
+                        } else {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                dismissOffset = 0
+                            }
+                        }
+                    },
+                    onHorizontalSkip: { seconds in
+                        playback.skip(seconds: seconds)
+                        showSkipHint(seconds)
+                        revealControls()
+                    }
+                )
+                .ignoresSafeArea()
 
                 if !playback.hasVideo && !isLoadingTrack {
                     audioPlaceholder
@@ -271,6 +305,7 @@ struct RemoteMediaPlayerView: View {
                         .padding(.vertical, 10)
                         .background(.black.opacity(0.55), in: Capsule())
                         .foregroundStyle(.white)
+                        .allowsHitTesting(false)
                 }
 
                 if controlsVisible {
@@ -278,25 +313,41 @@ struct RemoteMediaPlayerView: View {
                         topBar
                             .padding(.top, landscape ? 8 : 4)
                         Spacer()
+                            .allowsHitTesting(false)
                         bottomBar
                             .padding(.bottom, landscape ? 8 : 4)
                     }
                     .transition(.opacity)
                 }
             }
+            .offset(y: dismissOffset)
+            .scaleEffect(1 - min(dismissOffset / 1400, 0.12))
+            .opacity(1 - min(dismissOffset / 900, 0.45))
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(Color.black.opacity(1 - min(dismissOffset / 500, 0.55)).ignoresSafeArea())
         .statusBarHidden(!controlsVisible)
         .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         .preferredColorScheme(.dark)
-        .task { await openCurrent(autoplay: true) }
+        .task {
+            if let url = current?.localURL, playback.isCurrentMedia(url) {
+                revealControls()
+                return
+            }
+            await openCurrent(autoplay: true)
+        }
         .onChange(of: playback.didFinish) { _, finished in
             guard finished else { return }
             Task { await advance(by: 1, auto: true) }
         }
+        .onAppear { onPlaylistChange?(items, index) }
+        .onChange(of: index) { _, newValue in
+            onPlaylistChange?(items, newValue)
+        }
         .onDisappear {
             hideTask?.cancel()
-            playback.stop()
+            if !playback.isPictureInPictureActive {
+                playback.stop()
+            }
         }
     }
 
@@ -318,7 +369,7 @@ struct RemoteMediaPlayerView: View {
 
     private var topBar: some View {
         HStack {
-            Button(action: onClose) {
+            Button(action: closePlayer) {
                 Image(systemName: "xmark")
                     .font(.body.weight(.semibold))
                     .padding(10)
@@ -338,6 +389,17 @@ struct RemoteMediaPlayerView: View {
             }
             .foregroundStyle(.white)
             Spacer()
+            if playback.isPictureInPicturePossible {
+                Button {
+                    playback.startPictureInPicture()
+                } label: {
+                    Image(systemName: playback.isPictureInPictureActive ? "pip.exit" : "pip.enter")
+                        .font(.body.weight(.semibold))
+                        .padding(10)
+                        .background(.black.opacity(0.45), in: Circle())
+                }
+                .accessibilityLabel("Picture in Picture")
+            }
             if let url = current?.localURL {
                 ShareLink(item: url) {
                     Image(systemName: "square.and.arrow.up")
@@ -420,27 +482,15 @@ struct RemoteMediaPlayerView: View {
         .background(.black.opacity(0.45))
     }
 
-    private var seekSwipe: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard abs(dx) > abs(dy), abs(dx) > 40 else { return }
-                let seconds = min(max(Int((dx / 70).rounded()) * 10, -120), 120)
-                guard seconds != 0 else { return }
-                playback.skip(seconds: seconds)
-                showSkipHint(seconds)
-                revealControls()
-            }
+    private func handlePlayerTap() {
+        revealControls()
     }
 
-    private func toggleControls() {
-        if controlsVisible {
-            hideTask?.cancel()
-            withAnimation(.easeOut(duration: 0.2)) { controlsVisible = false }
-        } else {
-            revealControls()
-        }
+    private func closePlayer() {
+        hideTask?.cancel()
+        playback.stopPictureInPicture()
+        playback.stop()
+        onClose()
     }
 
     private func revealControls() {
@@ -529,10 +579,19 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
     @Published var durationText = "00:00"
     @Published var statusMessage: String?
     @Published var didFinish = false
+    @Published var isPictureInPictureActive = false
+    @Published var isPictureInPicturePossible = AVPictureInPictureController.isPictureInPictureSupported()
     @Published private(set) var progress: Double = 0
+
+    var onRestoreUserInterface: ((@escaping (Bool) -> Void) -> Void)?
+    var onPictureInPictureStopped: (() -> Void)?
 
     private var ticker: Timer?
     private var ignoreEnded = false
+    private var pipController: AVPictureInPictureController?
+    private var pipContent: PiPContentViewController?
+    private let pipBridge = PictureInPictureBridge()
+    private weak var inlineView: UIView?
 
     var displayedProgress: Double {
         isSeeking ? seekPosition : progress
@@ -541,6 +600,26 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
     override init() {
         super.init()
         player.delegate = self
+        pipBridge.onWillStart = { [weak self] in
+            Task { @MainActor in
+                self?.handlePictureInPictureWillStart()
+            }
+        }
+        pipBridge.onDidStop = { [weak self] in
+            Task { @MainActor in
+                self?.handlePictureInPictureDidStop()
+            }
+        }
+        pipBridge.onFailed = { [weak self] message in
+            Task { @MainActor in
+                self?.handlePictureInPictureFailure(message)
+            }
+        }
+        pipBridge.onRestore = { [weak self] completion in
+            Task { @MainActor in
+                self?.handleRestoreUserInterface(completion: completion)
+            }
+        }
         ticker = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.syncTime()
@@ -552,10 +631,97 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
     }
 
     func attach(drawable: UIView) {
-        player.drawable = drawable
+        inlineView = drawable
+        if !isPictureInPictureActive {
+            player.drawable = drawable
+        }
+        preparePictureInPicture(sourceView: drawable)
+    }
+
+    func preparePictureInPicture(sourceView: UIView) {
+        activateAudioSession()
+        guard AVPictureInPictureController.isPictureInPictureSupported() else {
+            isPictureInPicturePossible = false
+            return
+        }
+        let content = pipContent ?? PiPContentViewController()
+        pipContent = content
+        let source = AVPictureInPictureController.ContentSource(
+            activeVideoCallSourceView: sourceView,
+            contentViewController: content
+        )
+        if let pipController {
+            pipController.contentSource = source
+            isPictureInPicturePossible = true
+            return
+        }
+        let controller = AVPictureInPictureController(contentSource: source)
+        controller.delegate = pipBridge
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        pipController = controller
+        isPictureInPicturePossible = true
+    }
+
+    func startPictureInPicture() {
+        activateAudioSession()
+        if let inlineView {
+            preparePictureInPicture(sourceView: inlineView)
+        }
+        if isPictureInPictureActive {
+            pipController?.stopPictureInPicture()
+        } else {
+            pipController?.startPictureInPicture()
+        }
+    }
+
+    func stopPictureInPicture() {
+        pipController?.stopPictureInPicture()
+    }
+
+    fileprivate func handlePictureInPictureWillStart() {
+        if let canvas = pipContent?.canvas {
+            player.drawable = canvas
+        }
+        if player.videoSize.width > 0, player.videoSize.height > 0 {
+            pipContent?.preferredContentSize = player.videoSize
+        }
+        isPictureInPictureActive = true
+    }
+
+    fileprivate func handlePictureInPictureDidStop() {
+        if let inlineView {
+            player.drawable = inlineView
+        }
+        isPictureInPictureActive = false
+        onPictureInPictureStopped?()
+    }
+
+    fileprivate func handlePictureInPictureFailure(_ message: String) {
+        statusMessage = message
+        isPictureInPictureActive = false
+    }
+
+    fileprivate func handleRestoreUserInterface(completion: @escaping @Sendable (Bool) -> Void) {
+        if let onRestoreUserInterface {
+            onRestoreUserInterface(completion)
+        } else {
+            completion(true)
+        }
+    }
+
+    private func activateAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback, options: [])
+        try? session.setActive(true)
+    }
+
+    func isCurrentMedia(_ url: URL) -> Bool {
+        guard let current = player.media?.url else { return false }
+        return current.standardizedFileURL == url.standardizedFileURL
     }
 
     func open(_ url: URL, autoplay: Bool) {
+        activateAudioSession()
         ignoreEnded = true
         didFinish = false
         statusMessage = nil
@@ -605,8 +771,10 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
         ignoreEnded = true
         ticker?.invalidate()
         ticker = nil
+        pipController?.stopPictureInPicture()
         player.stop()
         player.drawable = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     nonisolated func mediaPlayerStateChanged(_ aNotification: Notification) {
@@ -683,15 +851,202 @@ final class VLCPlaybackController: NSObject, ObservableObject, VLCMediaPlayerDel
 private struct VLCVideoSurface: UIViewRepresentable {
     @ObservedObject var controller: VLCPlaybackController
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+    func makeUIView(context: Context) -> VideoCanvasView {
+        let view = VideoCanvasView()
         view.backgroundColor = .black
-        controller.attach(drawable: view)
+        view.isUserInteractionEnabled = false
+        view.onAttachedToWindow = { canvas in
+            controller.attach(drawable: canvas)
+        }
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        controller.attach(drawable: uiView)
+    func updateUIView(_ uiView: VideoCanvasView, context: Context) {
+        uiView.isUserInteractionEnabled = false
+        uiView.onAttachedToWindow = { canvas in
+            controller.attach(drawable: canvas)
+        }
+        if uiView.window != nil {
+            controller.attach(drawable: uiView)
+        }
+    }
+}
+
+private final class VideoCanvasView: UIView {
+    var onAttachedToWindow: ((UIView) -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            onAttachedToWindow?(self)
+        }
+    }
+}
+
+private final class PictureInPictureBridge: NSObject, AVPictureInPictureControllerDelegate {
+    var onWillStart: (@Sendable () -> Void)?
+    var onDidStop: (@Sendable () -> Void)?
+    var onFailed: (@Sendable (String) -> Void)?
+    var onRestore: (@Sendable (@escaping @Sendable (Bool) -> Void) -> Void)?
+
+    func pictureInPictureControllerWillStartPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) {
+        onWillStart?()
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController
+    ) {
+        onDidStop?()
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        onFailed?(error.localizedDescription)
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        let box = UncheckedCompletion(completionHandler)
+        if let onRestore {
+            onRestore { restored in
+                box.call(restored)
+            }
+        } else {
+            box.call(true)
+        }
+    }
+}
+
+private final class UncheckedCompletion: @unchecked Sendable {
+    private let handler: (Bool) -> Void
+
+    init(_ handler: @escaping (Bool) -> Void) {
+        self.handler = handler
+    }
+
+    func call(_ value: Bool) {
+        handler(value)
+    }
+}
+
+private struct PlayerInteractionLayer: UIViewRepresentable {
+    var onTap: () -> Void
+    var onDismissChanged: (CGFloat) -> Void
+    var onDismissEnded: (CGFloat, CGFloat) -> Void
+    var onHorizontalSkip: (Int) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> PlayerInteractionView {
+        let view = PlayerInteractionView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: PlayerInteractionView, context: Context) {
+        context.coordinator.parent = self
+        uiView.coordinator = context.coordinator
+    }
+
+    final class Coordinator {
+        var parent: PlayerInteractionLayer
+        init(_ parent: PlayerInteractionLayer) {
+            self.parent = parent
+        }
+    }
+}
+
+private final class PlayerInteractionView: UIView, UIGestureRecognizerDelegate {
+    weak var coordinator: PlayerInteractionLayer.Coordinator?
+    private var isDismissing = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isMultipleTouchEnabled = false
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
+        tap.delegate = self
+        pan.delegate = self
+        addGestureRecognizer(pan)
+        addGestureRecognizer(tap)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func handleTap() {
+        coordinator?.parent.onTap()
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self)
+        let velocity = gesture.velocity(in: self)
+        switch gesture.state {
+        case .changed:
+            if isDismissing || (translation.y > 24 && translation.y > abs(translation.x) + 8) {
+                isDismissing = true
+                coordinator?.parent.onDismissChanged(translation.y)
+            }
+        case .ended, .cancelled:
+            if isDismissing {
+                isDismissing = false
+                coordinator?.parent.onDismissEnded(translation.y, velocity.y)
+            } else if abs(translation.x) > abs(translation.y), abs(translation.x) > 36 {
+                let seconds = min(max(Int((translation.x / 70).rounded()) * 10, -120), 120)
+                if seconds != 0 {
+                    coordinator?.parent.onHorizontalSkip(seconds)
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+}
+
+private final class PiPContentViewController: AVPictureInPictureVideoCallViewController {
+    let canvas = UIView()
+
+    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        preferredContentSize = CGSize(width: 16, height: 9)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        canvas.backgroundColor = .black
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(canvas)
+        NSLayoutConstraint.activate([
+            canvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            canvas.topAnchor.constraint(equalTo: view.topAnchor),
+            canvas.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
     }
 }
 

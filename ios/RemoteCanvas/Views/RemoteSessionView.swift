@@ -332,6 +332,9 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
     @State private var errorMessage: String?
     @State private var preview: FilePreviewItem?
     @State private var previewCleanup: URL?
+    @StateObject private var mediaPlayback = VLCPlaybackController()
+    @State private var pipRestoreItem: FilePreviewItem?
+    @State private var isRestoringFromPiP = false
     @State private var downloadLabel: String?
     @State private var isImporterPresented = false
     @State private var isContentConcealed = false
@@ -339,123 +342,157 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if isLoading && entries.isEmpty {
-                    ProgressView()
-                } else if entries.isEmpty {
-                    ContentUnavailableView("Empty", systemImage: "folder")
-                } else {
-                    List(entries) { entry in
-                        Button {
-                            open(entry)
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: entry.isDirectory ? folderIcon(for: entry) : icon(for: entry.name))
-                                    .foregroundStyle(entry.isDirectory ? .secondary : .primary)
-                                    .frame(width: 28)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.name)
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                    if !entry.isDirectory {
-                                        Text(ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file))
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
+            fileList
+                .navigationTitle(currentPath.isEmpty ? "Files" : URL(fileURLWithPath: currentPath).lastPathComponent)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { fileToolbar }
+                .task { await load(path: "") }
+                .alert("File error", isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }
+                )) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(errorMessage ?? "Unknown error")
+                }
+                .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.data]) { result in
+                    guard case .success(let url) = result else { return }
+                    Task {
+                        do {
+                            try await transport.upload(localURL: url, to: currentPath)
+                            await load(path: currentPath)
+                        } catch {
+                            errorMessage = error.localizedDescription
                         }
                     }
-                    .refreshable { await load(path: currentPath) }
                 }
-            }
-            .navigationTitle(currentPath.isEmpty ? "Files" : URL(fileURLWithPath: currentPath).lastPathComponent)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if history.isEmpty {
-                        Button("Close") { dismiss() }
-                    } else {
-                        Button {
-                            let previous = history.removeLast()
-                            Task { await load(path: previous) }
-                        } label: {
-                            Image(systemName: "chevron.left")
-                        }
-                        .accessibilityLabel("Back")
+                .overlay { loadingOverlay }
+                .fullScreenCover(item: $preview, onDismiss: handlePreviewDismiss, content: previewCover)
+                .onAppear { attachMediaPlaybackHandlers() }
+                .onChange(of: mediaPlayback.isPictureInPictureActive, handlePictureInPictureChange)
+                .onChange(of: preview != nil) { _, hasPreview in
+                    if hasPreview {
+                        isRestoringFromPiP = false
                     }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        isImporterPresented = true
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                    .accessibilityLabel("Upload")
-                    .disabled(currentPath.isEmpty)
-                }
-            }
-            .task { await load(path: "") }
-            .alert("File error", isPresented: Binding(
-                get: { errorMessage != nil },
-                set: { if !$0 { errorMessage = nil } }
-            )) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(errorMessage ?? "Unknown error")
-            }
-            .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.data]) { result in
-                guard case .success(let url) = result else { return }
-                Task {
-                    do {
-                        try await transport.upload(localURL: url, to: currentPath)
-                        await load(path: currentPath)
-                    } catch {
-                        errorMessage = error.localizedDescription
+                .overlay {
+                    if isContentConcealed || (blockScreenCapture && isScreenCaptured) {
+                        Color.black.ignoresSafeArea()
                     }
                 }
-            }
-            .overlay {
-                if isLoading && !entries.isEmpty {
-                    VStack(spacing: 8) {
-                        ProgressView()
-                        if let downloadLabel {
-                            Text(downloadLabel)
-                                .font(.caption)
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    .padding(16)
-                    .background(.black.opacity(0.55), in: Capsule())
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                    if hideWhenInactive { isContentConcealed = true }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    isContentConcealed = false
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
+                    isScreenCaptured = UIScreen.main.isCaptured
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var fileList: some View {
+        if isLoading && entries.isEmpty {
+            ProgressView()
+        } else if entries.isEmpty {
+            ContentUnavailableView("Empty", systemImage: "folder")
+        } else {
+            List(entries) { entry in
+                Button {
+                    open(entry)
+                } label: {
+                    fileRow(entry)
                 }
             }
-            .fullScreenCover(item: $preview, onDismiss: cleanupPreview) { item in
-                FilePreviewContainer(
-                    item: item,
-                    loadRemoteFile: { entry in
-                        if let previewCleanup {
-                            return try await transport.download(entry, into: previewCleanup)
-                        }
-                        return try await transport.download(entry)
-                    }
-                ) {
-                    preview = nil
+            .refreshable { await load(path: currentPath) }
+        }
+    }
+
+    private func fileRow(_ entry: RemoteFileEntry) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: entry.isDirectory ? folderIcon(for: entry) : icon(for: entry.name))
+                .foregroundStyle(entry.isDirectory ? .secondary : .primary)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if !entry.isDirectory {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .overlay {
-                if isContentConcealed || (blockScreenCapture && isScreenCaptured) {
-                    Color.black.ignoresSafeArea()
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var fileToolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            if history.isEmpty {
+                Button("Close") { dismiss() }
+            } else {
+                Button {
+                    let previous = history.removeLast()
+                    Task { await load(path: previous) }
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .accessibilityLabel("Back")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                isImporterPresented = true
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .accessibilityLabel("Upload")
+            .disabled(currentPath.isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private var loadingOverlay: some View {
+        if isLoading && !entries.isEmpty {
+            VStack(spacing: 8) {
+                ProgressView()
+                if let downloadLabel {
+                    Text(downloadLabel)
+                        .font(.caption)
+                        .foregroundStyle(.white)
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-                if hideWhenInactive { isContentConcealed = true }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                isContentConcealed = false
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
-                isScreenCaptured = UIScreen.main.isCaptured
-            }
+            .padding(16)
+            .background(.black.opacity(0.55), in: Capsule())
+        }
+    }
+
+    private func previewCover(_ item: FilePreviewItem) -> some View {
+        FilePreviewContainer(
+            item: item,
+            loadRemoteFile: downloadIntoPreviewFolder,
+            sharedPlayback: mediaPlayback,
+            onPlaylistChange: { playlist, index in
+                pipRestoreItem = .media(playlist: playlist, startIndex: index)
+            },
+            onClose: { preview = nil }
+        )
+    }
+
+    private func downloadIntoPreviewFolder(_ entry: RemoteFileEntry) async throws -> URL {
+        if let previewCleanup {
+            return try await transport.download(entry, into: previewCleanup)
+        }
+        return try await transport.download(entry)
+    }
+
+    private func handlePictureInPictureChange(_ oldValue: Bool, _ active: Bool) {
+        if active, case .media = preview {
+            pipRestoreItem = preview
+            preview = nil
         }
     }
 
@@ -533,6 +570,31 @@ private struct RemoteFileBrowserView<Transport: RemoteSessionTransport>: View {
         default:
             .document(url)
         }
+    }
+
+    private func attachMediaPlaybackHandlers() {
+        mediaPlayback.onRestoreUserInterface = { completion in
+            isRestoringFromPiP = true
+            preview = pipRestoreItem ?? preview
+            completion(true)
+        }
+        mediaPlayback.onPictureInPictureStopped = {
+            if isRestoringFromPiP { return }
+            if preview == nil {
+                mediaPlayback.stop()
+                cleanupPreview()
+                pipRestoreItem = nil
+            }
+        }
+    }
+
+    private func handlePreviewDismiss() {
+        if mediaPlayback.isPictureInPictureActive || isRestoringFromPiP {
+            return
+        }
+        mediaPlayback.stop()
+        cleanupPreview()
+        pipRestoreItem = nil
     }
 
     private func cleanupPreview() {
